@@ -1,0 +1,57 @@
+"""
+config.py — Central configuration for MedCAFAS MVP
+All tuneable parameters in one place.
+"""
+
+# ── LLM (Ollama) ─────────────────────────────────────────────────────────────
+OLLAMA_BASE_URL  = "http://localhost:11434"
+OLLAMA_MODEL     = "phi3.5:latest"          # ~2.2GB, fast on CPU. Alternatives: llama3.2:1b, mistral
+
+# ── Embeddings ────────────────────────────────────────────────────────────────
+EMBEDDING_MODEL  = "all-MiniLM-L6-v2"   # 80MB, very CPU-friendly
+
+# ── Knowledge Base / FAISS ────────────────────────────────────────────────────
+KB_INDEX_PATH    = "data/kb.index"
+KB_META_PATH     = "data/kb_meta.json"
+KB_MAX_DOCS      = 5000              # Multi-source expanded KB
+KB_SOURCES = {
+    "medqa_usmle" : 2000,   # GBaker/MedQA-USMLE-4-options  (clinical vignettes)
+    "pubmedqa"    : 1000,   # qiaojin/PubMedQA              (clinical trial abstracts)
+    "medmcqa"     : 2000,   # medmcqa                       (medical entrance MCQs)
+}
+
+# ── Self-Consistency ──────────────────────────────────────────────────────────
+NUM_SAMPLES      = 3                 # Re-sample LLM 3 times (balance speed vs. signal)
+SAMPLE_TEMP      = 0.8               # Sampling temperature for diversity
+CONSISTENCY_RISK_THRESHOLD = 0.65   # Below this → inconsistent → risky
+
+# ── Retrieval ─────────────────────────────────────────────────────────────────
+TOP_K            = 3                 # Retrieve top-3 docs
+MIN_SIM          = 0.40              # Below this cosine similarity → retrieval failed
+
+# ── NLI Critic ────────────────────────────────────────────────────────────────
+NLI_MODEL        = "cross-encoder/nli-deberta-v3-small"   # ~85MB, CPU-fast, no training
+NLI_BATCH_SIZE   = 8# Minimum claim length for NLI scoring.  Cross-encoder NLI models produce
+# near-zero entailment for short noun phrases (e.g. "Cholesterol embolization")
+# which are valid medical answers but not parseable as hypotheses.  Claims
+# shorter than this threshold fall back to retrieval-similarity scoring.
+NLI_MIN_CLAIM_WORDS = 8# ── Claim Decomposition (FACTSCORE-style per-claim verification) ──────────
+CLAIM_MIN_WORDS  = 4        # Minimum words for a fragment to be treated as a claim
+MAX_CLAIMS       = 10       # Cap claims per answer (prevents excessive NLI calls)
+
+# ── Temporal Detection ────────────────────────────────────────────────────
+TEMPORAL_DETECTION = True   # Flag claims that reference future calendar years
+# ── Score Aggregation ─────────────────────────────────────────────────────────
+WEIGHTS = {
+    "consistency" : 0.30,   # How much answers vary across samples
+    "retrieval"   : 0.35,   # How well claims are backed by evidence
+    "critic"      : 0.35,   # NLI entailment score (claim vs. evidence)
+}
+
+RISK_LOW     = 0.30          # Below → 🟢 LOW
+RISK_HIGH    = 0.40          # Above → 🔴 HIGH  (between → 🟡 CAUTION)
+
+# Hard-override: if BOTH retrieval and NLI critic fail this badly, force HIGH
+# regardless of weighted score (catches fabricated / future-dateed facts)
+RISK_HARD_RETRIEVAL_THRESHOLD = 0.50   # retrieval_risk > this
+RISK_HARD_CRITIC_THRESHOLD    = 0.85   # critic_risk    > this
