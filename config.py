@@ -22,7 +22,7 @@ BM25_CANDIDATES  = 20    # FAISS fetches this many candidates; BM25 reranks to T
 
 # ── Entity Overlap Check (Layer 2b) ──────────────────────────────────────────
 ENTITY_CHECK     = True  # Verify answer entities appear in retrieved evidence
-ENTITY_MIN_TERMS = 3     # Skip check if fewer than this many key terms found (raised to reduce false-positives on generic text)
+ENTITY_MIN_TERMS = 2     # Skip check if fewer than this many key terms found
 KB_SOURCES = {
     "medqa_usmle" : 2000,   # GBaker/MedQA-USMLE-4-options  (clinical vignettes)
     "pubmedqa"    : 1000,   # qiaojin/PubMedQA              (clinical trial abstracts)

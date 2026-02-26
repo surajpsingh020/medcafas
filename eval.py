@@ -90,7 +90,11 @@ def eval_no_llm(sample: EvalSample) -> EvalResult:
     risk_score, risk_flag = aggregate(consistency, retrieval_score, critic_score,
                                       entity_risk=entity_risk)
 
-    predicted_hallucinated = risk_flag != "LOW"
+    # CAUTION means the model is uncertain — not a confident hallucination call.
+    # Treating CAUTION as positive floods the system with false positives.
+    # Only flag HIGH as a positive prediction; CAUTION surfaces in the UI for
+    # human review but is not counted as a detected hallucination.
+    predicted_hallucinated = risk_flag == "HIGH"
     correct = predicted_hallucinated == sample.is_hallucinated
 
     return EvalResult(
@@ -117,7 +121,7 @@ def eval_with_llm(sample: EvalSample) -> EvalResult:
     from pipeline import predict
     result = predict(sample.question)
 
-    predicted_hallucinated = result.risk_flag != "LOW"
+    predicted_hallucinated = result.risk_flag == "HIGH"
     correct = predicted_hallucinated == sample.is_hallucinated
 
     return EvalResult(

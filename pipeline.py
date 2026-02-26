@@ -334,6 +334,28 @@ _DRUG_SUFFIX_RE = re.compile(
 
 
 
+# Common drug names that do NOT match the suffix regex but are frequently
+# swapped in hallucination perturbations (warfarin↔heparin, etc.).
+_DRUG_NAMES: frozenset = frozenset({
+    "warfarin", "heparin", "aspirin", "clopidogrel", "metformin", "glipizide",
+    "metoprolol", "atenolol", "amoxicillin", "vancomycin", "lisinopril", "losartan",
+    "furosemide", "hydrochlorothiazide", "morphine", "fentanyl", "epinephrine",
+    "atropine", "insulin", "prednisone", "prednisolone", "dexamethasone",
+    "ibuprofen", "naproxen", "acetaminophen", "paracetamol", "digoxin", "amiodarone",
+    "spironolactone", "amlodipine", "diltiazem", "verapamil", "nitroglycerin",
+    "adenosine", "dopamine", "dobutamine", "norepinephrine", "phenylephrine",
+    "haloperidol", "quetiapine", "olanzapine", "risperidone", "clozapine",
+    "lithium", "valproate", "carbamazepine", "phenytoin", "levetiracetam",
+    "gabapentin", "tramadol", "codeine", "oxycodone", "naloxone", "methadone",
+    "buprenorphine", "clonidine", "hydralazine", "nifedipine", "captopril",
+    "enalapril", "ramipril", "candesartan", "valsartan", "rosuvastatin",
+    "simvastatin", "pravastatin", "ezetimibe", "colchicine", "allopurinol",
+    "methotrexate", "hydroxychloroquine", "sulfasalazine", "azathioprine",
+    "cyclosporine", "tacrolimus", "tamoxifen", "letrozole", "anastrozole",
+    "cisplatin", "carboplatin", "paclitaxel", "docetaxel", "doxorubicin",
+    "cyclophosphamide", "fluorouracil", "gemcitabine", "imatinib",
+})
+
 # Curated whitelist of medically-relevant acronyms only.
 # Generic statistical / prose acronyms (BMI, CI, RR, HR, OR, SD, etc.) are
 # deliberately excluded because they appear in both hallucinated AND correct
@@ -387,6 +409,18 @@ def extract_medical_terms(text: str) -> List[str]:
     for word in re.findall(r'\b[A-Z]{2,6}\b', text):
         if word.lower() in _MEDICAL_ACRONYMS:
             terms.append(word.lower())
+
+    # 4. Named drug lookup — common drugs not caught by the suffix regex
+    text_lower = text.lower()
+    for drug in _DRUG_NAMES:
+        if re.search(r'\b' + re.escape(drug) + r'\b', text_lower):
+            terms.append(drug)
+
+    # 5. Mid-sentence title-case words (≥5 chars) — disease / anatomy / procedure terms.
+    #    Only capture words that follow a lowercase char + space (i.e. NOT sentence-
+    #    initial capitalisation) to avoid noise from the first word of a sentence.
+    for m in re.finditer(r'(?<=[a-z,;:]\s)[A-Z][a-z]{4,}\b', text):
+        terms.append(m.group().lower())
 
     # Deduplicate, drop tokens shorter than 3 chars
     seen: set = set()
@@ -655,8 +689,14 @@ def layer3_critic(
             claim_contradiction = max(contradiction_probs)
             logger.info(f"Layer 3 — Max question contradiction: {claim_contradiction:.3f}")
 
-    # Final score: mean claim entailment collapsed by question-level contradiction
-    critic_score = mean_entailment * (1.0 - claim_contradiction)
+    # Final score: mean claim entailment modulated by question-level contradiction.
+    # We apply only 30% of the contradiction signal (not 100%) because q_contradict
+    # measures KB-vs-question tension, which is noisy for yes/no research questions:
+    # the KB always "contradicts" the question framing even for correct answers.
+    # A 0.3 weight preserves the signal for genuinely contradicted factual claims
+    # while preventing correct answers with moderate NLI evidence from being
+    # collapsed to near-zero.
+    critic_score = mean_entailment * (1.0 - 0.3 * claim_contradiction)
     logger.info(
         f"Layer 3 — critic_score={critic_score:.3f}  "
         f"(mean_ent={mean_entailment:.3f}  q_contradict={claim_contradiction:.3f})"
