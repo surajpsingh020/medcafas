@@ -5,7 +5,7 @@ The complete MedCAFAS detection engine — 3 layers, fully CPU-based, no trainin
 
 Layer 1 — Self-Consistency   : Sample Ollama 3× → measure semantic drift
 Layer 2 — Retrieval          : FAISS top-k → cosine similarity vs. answer
-Layer 3 — NLI Critic         : cross-encoder/nli-deberta-v3-small → entailment
+Layer 3 — NLI Critic         : cross-encoder/nli-deberta-v3-base  → entailment
 
 All components are lazy-loaded once and cached as module-level singletons.
 """
@@ -565,7 +565,7 @@ def layer3_critic(
     Also checks whether the original question/claim is contradicted by KB evidence —
     a strong signal that the user's input is itself a false medical claim.
 
-    NLI labels for cross-encoder/nli-deberta-v3-small:
+    NLI labels for cross-encoder/nli-deberta-v3-base:
         index 0 = contradiction, index 1 = entailment, index 2 = neutral
 
     Returns:
