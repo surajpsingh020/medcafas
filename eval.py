@@ -639,11 +639,13 @@ def calibrate_scores(
         from sklearn.isotonic import IsotonicRegression
     except ImportError:
         print("  [calibration] scikit-learn not available — skipping.")
-        return results, compute_ece(results), compute_ece(results)
+        ece = compute_ece(results)
+        return results, ece, ece
 
     if len(results) < 20:
         print("  [calibration] Too few samples for calibration (< 20) — skipping.")
-        return results, compute_ece(results), compute_ece(results)
+        ece = compute_ece(results)
+        return results, ece, ece
 
     ece_before = compute_ece(results)
 
@@ -701,7 +703,7 @@ def main():
         help=(
             "Eval dataset.  'medqa' = MedQA-USMLE (short MCQ answers, tests retrieval)."
             "  'pubmedqa' = PubMedQA long_answer (full sentences, proper NLI test)."
-            "  'llm' = actual phi3.5 outputs labeled by NLI vs PubMedQA ground truth"
+            "  'llm' = actual phi3.5 outputs labeled by yes/no decision-matching vs PubMedQA final_decision"
             " (gold standard, requires Ollama, cannot be used with --no-llm)."
             "  Default: medqa"
         ),
