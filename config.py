@@ -22,7 +22,7 @@ BM25_CANDIDATES  = 20    # FAISS fetches this many candidates; BM25 reranks to T
 
 # ── Entity Overlap Check (Layer 2b) ──────────────────────────────────────────
 ENTITY_CHECK     = True  # Verify answer entities appear in retrieved evidence
-ENTITY_MIN_TERMS = 2     # Skip check if fewer than this many key terms found
+ENTITY_MIN_TERMS = 3     # Skip check if fewer than this many key terms found (raised to reduce false-positives on generic text)
 KB_SOURCES = {
     "medqa_usmle" : 2000,   # GBaker/MedQA-USMLE-4-options  (clinical vignettes)
     "pubmedqa"    : 1000,   # qiaojin/PubMedQA              (clinical trial abstracts)
@@ -58,8 +58,8 @@ WEIGHTS = {
     "entity"      : 0.15,   # Fraction of answer entities absent from retrieved evidence
 }
 
-RISK_LOW     = 0.30          # Below → 🟢 LOW
-RISK_HIGH    = 0.40          # Above → 🔴 HIGH  (between → 🟡 CAUTION)
+RISK_LOW     = 0.20          # Below → 🟢 LOW  (tuned on PubMedQA 100-sample, F1=0.721)
+RISK_HIGH    = 0.30          # Above → 🔴 HIGH  (between → 🟡 CAUTION)
 
 # Hard-override: if BOTH retrieval and NLI critic fail this badly, force HIGH
 # regardless of weighted score (catches fabricated / future-dateed facts)

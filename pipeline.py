@@ -333,21 +333,48 @@ _DRUG_SUFFIX_RE = re.compile(
 )
 
 
+
+# Curated whitelist of medically-relevant acronyms only.
+# Generic statistical / prose acronyms (BMI, CI, RR, HR, OR, SD, etc.) are
+# deliberately excluded because they appear in both hallucinated AND correct
+# answers, adding noise without discrimination power.
+_MEDICAL_ACRONYMS: frozenset = frozenset({
+    # Drug classes
+    "ssri", "snri", "maoi", "nsaid", "ace", "arb", "ccb", "ppi", "tca",
+    "statin", "ocp", "hrt",
+    # Diseases / syndromes
+    "copd", "chf", "ckd", "afib", "dvt", "pe", "mi", "acs", "cva", "tia",
+    "hiv", "hbv", "hcv", "tb", "uti", "sti", "mrsa", "ards", "sle", "dm",
+    "t2dm", "t1dm", "gerd", "ibs", "ibd",
+    # Procedures / investigations
+    "ecg", "ekg", "mri", "ct", "cbc", "bmp", "cmp", "bnp", "inr", "aptt",
+    "ptt", "ast", "alt", "gfr", "egfr", "bun", "hba1c", "a1c", "ldl", "hdl",
+    "echo", "tee", "tte",
+    # Drug name fragments (often appear as upper-case in medical text)
+    "pcr", "icu", "nicu", "er", "or",
+})
+
+
 def extract_medical_terms(text: str) -> List[str]:
     """
-    Lightweight extraction of candidate medical entities from text.
-    Uses regex patterns for:
-      - Drug names  (common pharmaceutical name suffixes)
-      - Dosage patterns  (500 mg, 10 mL, 250 mcg)
-      - Uppercase acronyms  (SSRI, ACE, NSAID, COPD)
-      - Capitalised multi-word noun phrases  (Metformin, Warfarin, Type 2 Diabetes)
+    Precision-focused extraction of medical entities.
+
+    Includes ONLY terms that have strong discriminative value:
+      - Drug names matched by pharmaceutical-suffix regex  (metformin, atorvastatin …)
+      - Explicit dosage patterns                           (500 mg, 10 ml, 2.5 mcg …)
+      - Whitelisted clinical acronyms                      (SSRI, NSAID, COPD …)
+
+    Deliberately EXCLUDED (high noise, appear equally in correct and hallucinated text):
+      - All-caps generic acronyms (BMI, CI, RR, HR, OR, SD …)
+      - Capitalised words at sentence starts
+      - Statistical terminology
     """
     terms: List[str] = []
 
-    # Drug suffix pattern
+    # 1. Drug suffix pattern (pharmaceutical-name endings)
     terms.extend(m.group().lower() for m in _DRUG_SUFFIX_RE.finditer(text))
 
-    # Dosage patterns: numbers + units
+    # 2. Dosage patterns: numbers + units (highly specific to clinical text)
     terms.extend(
         m.group().lower()
         for m in re.finditer(
@@ -356,16 +383,12 @@ def extract_medical_terms(text: str) -> List[str]:
         )
     )
 
-    # All-caps acronyms 2–6 chars
-    terms.extend(m.group().lower() for m in re.finditer(r"\b[A-Z]{2,6}\b", text))
+    # 3. Only add ALL-CAPS acronyms that are in the curated medical whitelist
+    for word in re.findall(r'\b[A-Z]{2,6}\b', text):
+        if word.lower() in _MEDICAL_ACRONYMS:
+            terms.append(word.lower())
 
-    # Capitalised words (likely proper nouns / named entities)
-    terms.extend(
-        m.group().lower()
-        for m in re.finditer(r"\b[A-Z][a-z]{3,}\b", text)
-    )
-
-    # Deduplicate, drop single-char tokens
+    # Deduplicate, drop tokens shorter than 3 chars
     seen: set = set()
     result: List[str] = []
     for t in terms:

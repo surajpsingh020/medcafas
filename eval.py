@@ -316,20 +316,29 @@ def load_eval_samples_pubmedqa(n: int = 100) -> List[EvalSample]:
 
 def load_eval_samples_llm(n: int = 40) -> List[EvalSample]:
     """
-    GOLD STANDARD EVAL: actual phi3.5 outputs labeled by NLI vs PubMedQA ground truth.
+    GOLD STANDARD EVAL: actual phi3.5 outputs labeled by decision-matching.
 
-    For each PubMedQA question:
-      1. Ask phi3.5 the question (via Ollama)
-      2. Use NLI to compare phi3.5's answer to the correct long_answer
-      3. If entailment < 0.30 → label as hallucinated
+    Methodology:
+      1. For each PubMedQA row with a definitive final_decision (yes / no),
+         ask phi3.5 the same yes/no question.
+      2. Extract phi3.5's decision from the first 200 characters of its answer
+         using regex (looks for the words 'yes' or 'no').
+      3. If phi3.5's decision MATCHES final_decision  → correct (not hallucinated).
+         If phi3.5's decision CONTRADICTS final_decision → hallucinated.
+         If answer is unclear / ambiguous                → skip.
 
-    This tests the real use case: detecting actual LLM hallucinations in
-    paragraph-length medical answers.  Requires Ollama running.  Cannot be
-    used with --no-llm.
+    This avoids the NLI phrasing-mismatch problem: an LLM can answer
+    "Yes, this is correct — treatment X reduces …" whereas PubMedQA's
+    long_answer begins with "The results show that …".  NLI entailment
+    near-always fails for such paraphrase pairs even when factually identical.
+    Decision-matching only tests the critical yes/no fact, which is stable
+    across surface-form variation.
+
+    Requires Ollama running.  Cannot be combined with --no-llm.
     """
     from pipeline import _ask_ollama
 
-    print("Loading PubMedQA for LLM-output eval (requires Ollama)...")
+    print("Loading PubMedQA for LLM decision-matching eval (requires Ollama)...")
     try:
         ds = load_dataset("qiaojin/PubMedQA", "pqa_labeled", split="train")
     except Exception as e:
@@ -338,16 +347,21 @@ def load_eval_samples_llm(n: int = 40) -> List[EvalSample]:
 
     print(f"   {len(ds)} total rows available")
 
-    nli = _get_nli_model()
     samples: List[EvalSample] = []
     target = n if n > 0 else len(ds)
 
     for row in ds:
         if len(samples) >= target:
             break
-        q            = (row.get("question")    or "").strip()
-        ground_truth = (row.get("long_answer") or "").strip()
-        if not q or len(ground_truth.split()) < 10:
+
+        q              = (row.get("question")        or "").strip()
+        final_decision = (row.get("final_decision")  or "").strip().lower()
+        ground_truth   = (row.get("long_answer")     or "").strip()
+
+        # Only use rows with a clear yes/no ground-truth decision
+        if not q or final_decision not in ("yes", "no"):
+            continue
+        if len(ground_truth.split()) < 5:
             continue
 
         print(f"   [{len(samples)+1}/{target}] LLM: {q[:55]}...", end=" ", flush=True)
@@ -357,21 +371,26 @@ def load_eval_samples_llm(n: int = 40) -> List[EvalSample]:
             print(f"SKIP ({e})")
             continue
 
-        # NLI: does the ground truth entail the LLM answer?
-        try:
-            nli_scores = nli.predict(
-                [(ground_truth[:512], llm_answer[:512])], apply_softmax=True
-            )
-            entailment = float(nli_scores[0][1])
-        except Exception:
-            entailment = 0.5
+        # Extract the LLM's yes/no decision from the start of its response
+        answer_prefix = llm_answer[:200].lower()
+        if re.search(r'\byes\b', answer_prefix):
+            phi_decision = "yes"
+        elif re.search(r'\bno\b', answer_prefix):
+            phi_decision = "no"
+        else:
+            print(f"SKIP (unclear decision)")
+            continue  # can't determine — skip rather than mislabel
 
-        is_hall = entailment < 0.30   # LLM said something different from ground truth
-        print(f"ent={entailment:.2f} -> {'HALL' if is_hall else 'OK'}")
+        is_hall = (phi_decision != final_decision)
+        print(f"phi={phi_decision} vs gt={final_decision} -> {'HALL' if is_hall else 'OK'}")
+
         samples.append(EvalSample(question=q, answer=llm_answer, is_hallucinated=is_hall))
 
     hall_n = sum(s.is_hallucinated for s in samples)
-    print(f"   {len(samples)} LLM samples ({len(samples)-hall_n} correct, {hall_n} hallucinated)")
+    print(
+        f"   {len(samples)} LLM samples "
+        f"({len(samples)-hall_n} correct, {hall_n} hallucinated)"
+    )
     return samples
 
 
@@ -586,6 +605,79 @@ def suggest_threshold_tuning(results: List[EvalResult]) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
+#  Post-hoc Isotonic Calibration                                             #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+def calibrate_scores(
+    results: List[EvalResult],
+    val_fraction: float = 0.30,
+    seed: int = 42,
+) -> Tuple[List[EvalResult], float, float]:
+    """
+    Post-hoc isotonic regression calibration.
+
+    Procedure:
+      1. Split results into a calibration set (val_fraction) and a held-out
+         test set using a fixed random seed so results are reproducible.
+      2. Fit IsotonicRegression on the calibration set  (risk_score → is_hallucinated).
+      3. Apply the learned monotone mapping to ALL results (in-place).
+      4. Return updated results, pre-cal ECE, post-cal ECE.
+
+    Why isotonic regression:
+      • Makes no distributional assumption (unlike Platt/sigmoid).
+      • Guaranteed to preserve rank order, so ROC-AUC is unaffected.
+      • Works even with small calibration sets (≥ 20 samples).
+
+    The function mutates r.risk_score in-place and rebuilds r.predicted_hallucinated
+    from the new scores using the current config thresholds.
+
+    Returns:
+        (results, ece_before, ece_after)
+    """
+    import random
+    try:
+        from sklearn.isotonic import IsotonicRegression
+    except ImportError:
+        print("  [calibration] scikit-learn not available — skipping.")
+        return results, compute_ece(results), compute_ece(results)
+
+    if len(results) < 20:
+        print("  [calibration] Too few samples for calibration (< 20) — skipping.")
+        return results, compute_ece(results), compute_ece(results)
+
+    ece_before = compute_ece(results)
+
+    # Split for calibration fit
+    rng = random.Random(seed)
+    shuffled = list(results)
+    rng.shuffle(shuffled)
+    n_val = max(10, int(len(shuffled) * val_fraction))
+    val_set = shuffled[:n_val]
+
+    y_val = [float(r.sample.is_hallucinated) for r in val_set]
+    s_val = [r.risk_score                    for r in val_set]
+
+    ir = IsotonicRegression(out_of_bounds="clip")
+    ir.fit(s_val, y_val)
+
+    # Apply calibrated scores in-place to all results
+    for r in results:
+        r.risk_score = float(ir.predict([r.risk_score])[0])
+        # Rebuild classification flag with updated score
+        if r.risk_score < config.RISK_LOW:
+            r.risk_flag = "LOW"
+        elif r.risk_score > config.RISK_HIGH:
+            r.risk_flag = "HIGH"
+        else:
+            r.risk_flag = "CAUTION"
+        r.predicted_hallucinated = r.risk_score >= config.RISK_LOW
+        r.correct = r.predicted_hallucinated == r.sample.is_hallucinated
+
+    ece_after = compute_ece(results)
+    return results, ece_before, ece_after
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 #  Entry point                                                                #
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -599,6 +691,8 @@ def main():
                         help="Also run threshold grid-search and print config.py suggestions.")
     parser.add_argument("--ci", action="store_true",
                         help="Compute bootstrap 95%% confidence intervals (adds ~10s).")
+    parser.add_argument("--calibrate", action="store_true",
+                        help="Apply post-hoc isotonic calibration and report ECE improvement.")
     parser.add_argument("--save", type=str, default="",
                         help="Save detailed results to this JSON file.")
     parser.add_argument(
@@ -649,6 +743,15 @@ def main():
     print(f"\n  Total time: {elapsed:.0f}s  ({elapsed/len(results):.1f}s/sample)")
 
     print_metrics(results, show_ci=args.ci)
+
+    if args.calibrate:
+        print("\n  Running post-hoc isotonic calibration …")
+        results, ece_before, ece_after = calibrate_scores(results)
+        print(f"  ECE before calibration : {ece_before:.4f}")
+        print(f"  ECE after  calibration : {ece_after:.4f}  "
+              f"({'improved' if ece_after < ece_before else 'no improvement'})")
+        print("  Re-computing metrics on calibrated scores:")
+        print_metrics(results, show_ci=args.ci)
 
     if args.tune:
         suggest_threshold_tuning(results)

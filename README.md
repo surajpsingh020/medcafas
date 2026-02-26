@@ -32,25 +32,33 @@ Input: Medical question / claim
   Sample LLM x 3 at temps {0.0, 0.8, 0.8}
   -> Mean pairwise semantic similarity -> consistency_score
        |
-  Layer 2 — Retrieval Verification  (FAISS + all-MiniLM-L6-v2)
-  Embed answer -> search 5 000-doc multi-source KB
-  -> Top-k cosine similarity -> retrieval_score, citations
+  Layer 2 — Hybrid Retrieval Verification  (FAISS + BM25 + all-MiniLM-L6-v2)
+  Embed answer -> BM25 lexical pre-filter (k=20) + FAISS cosine re-rank
+  Hybrid score: 40% BM25 + 60% cosine similarity
+  -> Top-k hybrid-scored docs -> retrieval_score, citations
+       |
+  Layer 2b — Entity Overlap Check  (pharma regex + curated acronym whitelist)
+  Extract drug names / dosages / clinical acronyms from answer
+  Check each term appears in pooled citation text
+  -> entity_risk: fraction of answer entities absent from evidence
        |
   Layer 3 — NLI Critic  (cross-encoder/nli-deberta-v3-small)
-  Decompose answer into atomic claims
-  For EACH claim: per-claim KB retrieval + NLI entailment/contradiction
+  Decompose answer into atomic claims (FACTSCORE-style)
+  For EACH claim (≥ 8 words): per-claim KB retrieval + NLI entailment
+  Short claims (<8 words): fall back to retrieval-similarity score
   -> verdict per claim: SUPPORTED / UNSUPPORTED / CONTRADICTED
   + whole-answer question contradiction check
        |
   Temporal Detection
   Regex scan claims for future calendar years -> hard override
        |
-  Aggregation
+  Aggregation  (consistency 25% + retrieval 30% + critic 30% + entity 15%)
   Weighted combination + 2 hard overrides
   -> risk_score in [0,1]  risk_flag: LOW / CAUTION / HIGH
+  Optional: post-hoc isotonic calibration (eval --calibrate)
 
 Output: risk_flag, risk_score, explanation, per-claim breakdown,
-        temporal_flags, citations
+        temporal_flags, entity_risk, citations
 ```
 
 ### Component Summary
@@ -58,10 +66,12 @@ Output: risk_flag, risk_score, explanation, per-claim breakdown,
 | Component | Model / Tool | Size | Purpose |
 |---|---|---|---|
 | LLM sampler | phi3.5 (Ollama) | ~2.2 GB | Self-consistency sampling |
-| Embedder | all-MiniLM-L6-v2 | 80 MB | Sentence embeddings |
+| Embedder | all-MiniLM-L6-v2 | 80 MB | Sentence embeddings (Layer 2 + per-claim) |
+| Lexical retriever | BM25Okapi (rank-bm25) | — | 40% of hybrid retrieval score (Layer 2) |
 | Vector DB | FAISS IndexFlatIP | — | O(n) exact nearest-neighbour |
 | NLI critic | cross-encoder/nli-deberta-v3-small | 85 MB | Per-claim entailment / contradiction |
 | KB sources | MedQA-USMLE + PubMedQA + MedMCQA | — | 5 000 medical evidence passages |
+| Calibrator | sklearn IsotonicRegression | — | Post-hoc ECE reduction (eval mode) |
 | Backend | FastAPI + uvicorn | — | REST API, port 8000 |
 | Frontend | Next.js 15 + TypeScript + Tailwind | — | Interactive UI, port 3000 |
 
@@ -179,11 +189,14 @@ Response (abbreviated):
 ### Running the eval suite
 
 ```bash
-# Fast (no LLM, ~2 min for 100 samples)
-python eval.py --no-llm --tune --ci --samples 100 --save results.json
+# Fast: no-LLM mode, PubMedQA dataset (~2 min for 100 samples)
+python eval.py --no-llm --dataset pubmedqa --tune --ci --samples 100 --save results.json
 
-# Full pipeline (~2 hours for 40 samples)
-python eval.py --samples 40 --ci --save results_full.json
+# With post-hoc isotonic calibration report
+python eval.py --no-llm --dataset pubmedqa --samples 100 --calibrate --ci
+
+# Gold standard: real phi3.5 outputs, decision-matching labels (~2 h for 40 samples)
+python eval.py --dataset llm --samples 40 --ci --save results_llm.json
 ```
 
 ### Flag reference
@@ -191,25 +204,33 @@ python eval.py --samples 40 --ci --save results_full.json
 | Flag | Description |
 |---|---|
 | `--no-llm` | Skip Layer 1 (Ollama). Tests retrieval + NLI only. |
+| `--dataset` | `medqa` (default) / `pubmedqa` / `llm` — see below |
 | `--tune` | Grid-search optimal RISK_LOW / RISK_HIGH thresholds |
+| `--calibrate` | Post-hoc isotonic calibration + before/after ECE report |
 | `--ci` | Bootstrap 95% confidence intervals (1 000 resamples) |
-| `--samples N` | Number of eval samples (0 = full test set ~1 273) |
+| `--samples N` | Number of eval samples (0 = full test set) |
 | `--save FILE` | Write per-sample results to JSON |
+
+### Evaluation datasets
+
+| `--dataset` | Source | Label strategy |
+|---|---|---|
+| `medqa` | GBaker/MedQA-USMLE test split | Rule-based perturbation (negation / drug swap) |
+| `pubmedqa` | qiaojin/PubMedQA long_answer | Rule-based perturbation of clinical abstracts |
+| `llm` | qiaojin/PubMedQA (final_decision) | Real phi3.5 outputs; labeled by yes/no decision-matching |
+
+The `--dataset llm` mode is the most realistic: it asks phi3.5 actual PubMedQA questions, then
+labels the answer as hallucinated if phi3.5's yes/no decision contradicts PubMedQA's
+`final_decision` field. This avoids the NLI phrasing-mismatch problem where correct paraphrases
+are mislabeled as hallucinations.
 
 ### Metrics
 
 - **Accuracy** — binary classification correct rate
 - **Precision / Recall / F1** — hallucinated class
-- **ROC-AUC** — threshold-free ranking quality
+- **ROC-AUC** — threshold-free ranking quality  
 - **ECE** — Expected Calibration Error (< 0.05 = well-calibrated)
 - **Bootstrap 95% CIs** — for accuracy, F1, and ROC-AUC
-
-### Evaluation dataset
-Test samples from `GBaker/MedQA-USMLE-4-options` test split.
-Hallucinated answers use rule-based perturbation of correct answers:
-- Negation flips (`first-line` → `last-resort`)
-- Drug substitutions (warfarin ↔ heparin, metformin ↔ glipizide, …)
-- Direction inversions (`increases` → `decreases`)
 
 ---
 
@@ -218,14 +239,29 @@ Hallucinated answers use rule-based perturbation of correct answers:
 All tuneable parameters in [`config.py`](config.py):
 
 ```python
+# Retrieval
 KB_MAX_DOCS      = 5000
 KB_SOURCES = {"medqa_usmle": 2000, "pubmedqa": 1000, "medmcqa": 2000}
-CLAIM_MIN_WORDS  = 4          # min words to treat a fragment as a claim
-MAX_CLAIMS       = 10         # cap per answer (limits NLI cost)
+BM25_WEIGHT      = 0.40       # 40% BM25 lexical + 60% cosine in hybrid score
+BM25_CANDIDATES  = 20         # FAISS fetches this many; BM25 reranks to TOP_K
+
+# Entity check
+ENTITY_CHECK     = True
+ENTITY_MIN_TERMS = 3          # skip if fewer than 3 pharma/dosage/clinical terms found
+
+# NLI / claims
+CLAIM_MIN_WORDS  = 4
+MAX_CLAIMS       = 10
+NLI_MIN_CLAIM_WORDS = 8       # shorter claims fall back to retrieval-similarity
+
+# Temporal detection
 TEMPORAL_DETECTION = True
-RISK_LOW         = 0.30       # below -> LOW
-RISK_HIGH        = 0.40       # above -> HIGH
-WEIGHTS = {"consistency": 0.30, "retrieval": 0.35, "critic": 0.35}
+
+# Thresholds (tuned on PubMedQA 100-sample, F1=0.721)
+RISK_LOW         = 0.20       # below -> LOW
+RISK_HIGH        = 0.30       # above -> HIGH
+
+WEIGHTS = {"consistency": 0.25, "retrieval": 0.30, "critic": 0.30, "entity": 0.15}
 ```
 
 ---
