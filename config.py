@@ -13,7 +13,7 @@ EMBEDDING_MODEL  = "all-MiniLM-L6-v2"   # 80MB, very CPU-friendly
 # ── Knowledge Base / FAISS ────────────────────────────────────────────────────
 KB_INDEX_PATH    = "data/kb.index"
 KB_META_PATH     = "data/kb_meta.json"
-KB_MAX_DOCS      = 5000              # Multi-source expanded KB
+KB_MAX_DOCS      = 8000              # Multi-source expanded KB (4 sources)
 
 # ── BM25 Hybrid Retrieval ─────────────────────────────────────────────────────
 BM25_INDEX_PATH  = "data/kb_bm25.pkl"  # Serialised BM25Okapi + raw passages
@@ -24,9 +24,10 @@ BM25_CANDIDATES  = 20    # FAISS fetches this many candidates; BM25 reranks to T
 ENTITY_CHECK     = True  # Verify answer entities appear in retrieved evidence
 ENTITY_MIN_TERMS = 2     # Skip check if fewer than this many key terms found
 KB_SOURCES = {
-    "medqa_usmle" : 2000,   # GBaker/MedQA-USMLE-4-options  (clinical vignettes)
-    "pubmedqa"    : 1000,   # qiaojin/PubMedQA              (clinical trial abstracts)
-    "medmcqa"     : 2000,   # medmcqa                       (medical entrance MCQs)
+    "medqa_usmle"        : 2000,   # GBaker/MedQA-USMLE-4-options  (clinical vignettes)
+    "pubmedqa"           : 1000,   # qiaojin/PubMedQA pqa_labeled  (clinical trial abstracts)
+    "medmcqa"           : 2000,   # medmcqa                        (medical entrance MCQs)
+    "pubmedqa_artificial": 3000,   # qiaojin/PubMedQA pqa_artificial (211k synthetic trials)
 }
 
 # ── Self-Consistency ──────────────────────────────────────────────────────────

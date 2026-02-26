@@ -100,6 +100,38 @@ def _load_pubmedqa(max_docs: int) -> Tuple[List[str], List[dict]]:
     return passages, meta
 
 
+def _load_pubmedqa_artificial(max_docs: int) -> Tuple[List[str], List[dict]]:
+    """
+    qiaojin/PubMedQA pqa_artificial — 211k synthetic biomedical QA pairs.
+    Dramatically expands KB coverage for specific clinical trial topics that
+    the pqa_labeled split (1000 docs) cannot cover alone.
+    """
+    print(f"  [4/4] PubMedQA-Artificial  (target: {max_docs} docs)...")
+    try:
+        ds = load_dataset("qiaojin/PubMedQA", "pqa_artificial", split="train")
+    except Exception as e:
+        print(f"         FAILED: {e}")
+        return [], []
+
+    passages, meta = [], []
+    for row in ds:
+        if len(passages) >= max_docs:
+            break
+        q   = (row.get("question",    "") or "").strip()
+        ans = (row.get("long_answer", "") or "").strip()
+        if not q or len(ans.split()) < 10:
+            continue
+        passages.append(f"Question: {q} Answer: {ans}")
+        meta.append({
+            "question": q,
+            "answer"  : ans[:500],
+            "source"  : "PubMedQA-Artificial",
+        })
+
+    print(f"         Loaded {len(passages)} passages")
+    return passages, meta
+
+
 def _load_medmcqa(max_docs: int) -> Tuple[List[str], List[dict]]:
     """
     medmcqa — 194 k medical entrance MCQs with explanations.
@@ -157,9 +189,10 @@ def build():
     all_meta:     List[dict] = []
 
     for loader, key in [
-        (_load_medqa,    "medqa_usmle"),
-        (_load_pubmedqa, "pubmedqa"),
-        (_load_medmcqa,  "medmcqa"),
+        (_load_medqa,               "medqa_usmle"),
+        (_load_pubmedqa,            "pubmedqa"),
+        (_load_medmcqa,             "medmcqa"),
+        (_load_pubmedqa_artificial, "pubmedqa_artificial"),
     ]:
         max_n = config.KB_SOURCES.get(key, 0)
         if max_n <= 0:
