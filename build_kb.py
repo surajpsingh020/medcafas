@@ -21,6 +21,7 @@ Output:
 
 import json
 import os
+import pickle
 import sys
 from collections import Counter
 from typing import List, Tuple
@@ -28,6 +29,7 @@ from typing import List, Tuple
 import faiss
 import numpy as np
 from datasets import load_dataset
+from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
 import config
@@ -199,6 +201,14 @@ def build():
     faiss.write_index(index, config.KB_INDEX_PATH)
     with open(config.KB_META_PATH, "w") as f:
         json.dump(all_meta, f, indent=2)
+
+    # ── 4. Build BM25 index ─────────────────────────────────────────────────────
+    print("\nBuilding BM25 lexical index...")
+    tokenized_corpus = [p.lower().split() for p in all_passages]
+    bm25 = BM25Okapi(tokenized_corpus)
+    with open(config.BM25_INDEX_PATH, "wb") as f:
+        pickle.dump({"bm25": bm25, "passages": all_passages}, f)
+    print(f"   BM25 index saved to {config.BM25_INDEX_PATH}")
 
     # Source breakdown
     counts = Counter(m["source"] for m in all_meta)

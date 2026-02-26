@@ -14,6 +14,15 @@ EMBEDDING_MODEL  = "all-MiniLM-L6-v2"   # 80MB, very CPU-friendly
 KB_INDEX_PATH    = "data/kb.index"
 KB_META_PATH     = "data/kb_meta.json"
 KB_MAX_DOCS      = 5000              # Multi-source expanded KB
+
+# ── BM25 Hybrid Retrieval ─────────────────────────────────────────────────────
+BM25_INDEX_PATH  = "data/kb_bm25.pkl"  # Serialised BM25Okapi + raw passages
+BM25_WEIGHT      = 0.40  # 40% BM25 lexical + 60% cosine semantic in hybrid score
+BM25_CANDIDATES  = 20    # FAISS fetches this many candidates; BM25 reranks to TOP_K
+
+# ── Entity Overlap Check (Layer 2b) ──────────────────────────────────────────
+ENTITY_CHECK     = True  # Verify answer entities appear in retrieved evidence
+ENTITY_MIN_TERMS = 2     # Skip check if fewer than this many key terms found
 KB_SOURCES = {
     "medqa_usmle" : 2000,   # GBaker/MedQA-USMLE-4-options  (clinical vignettes)
     "pubmedqa"    : 1000,   # qiaojin/PubMedQA              (clinical trial abstracts)
@@ -43,9 +52,10 @@ MAX_CLAIMS       = 10       # Cap claims per answer (prevents excessive NLI call
 TEMPORAL_DETECTION = True   # Flag claims that reference future calendar years
 # ── Score Aggregation ─────────────────────────────────────────────────────────
 WEIGHTS = {
-    "consistency" : 0.30,   # How much answers vary across samples
-    "retrieval"   : 0.35,   # How well claims are backed by evidence
-    "critic"      : 0.35,   # NLI entailment score (claim vs. evidence)
+    "consistency" : 0.25,   # How much answers vary across samples
+    "retrieval"   : 0.30,   # How well claims are backed by evidence (BM25 + cosine)
+    "critic"      : 0.30,   # NLI entailment score (claim vs. evidence)
+    "entity"      : 0.15,   # Fraction of answer entities absent from retrieved evidence
 }
 
 RISK_LOW     = 0.30          # Below → 🟢 LOW

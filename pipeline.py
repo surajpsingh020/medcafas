@@ -22,7 +22,9 @@ from typing import Dict, List, Optional, Tuple
 
 import faiss
 import numpy as np
+import pickle
 import requests
+from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -40,6 +42,7 @@ _embedder: Optional[SentenceTransformer] = None
 _nli_model: Optional[CrossEncoder]       = None
 _faiss_index: Optional[faiss.Index]      = None
 _kb_meta: Optional[List[Dict]]           = None
+_bm25_data:   Optional[Dict]             = None
 
 
 def _get_embedder() -> SentenceTransformer:
@@ -73,6 +76,20 @@ def _get_kb() -> Tuple[faiss.Index, List[Dict]]:
     return _faiss_index, _kb_meta
 
 
+def _get_bm25() -> Dict:
+    """Load the BM25 index built by build_kb.py.  Returns empty dict if missing."""
+    global _bm25_data
+    if _bm25_data is None:
+        try:
+            with open(config.BM25_INDEX_PATH, "rb") as f:
+                _bm25_data = pickle.load(f)
+            logger.info(f"BM25 index loaded: {len(_bm25_data.get('passages', []))} docs")
+        except (FileNotFoundError, Exception) as e:
+            logger.warning(f"BM25 index not available, falling back to cosine-only ({e})")
+            _bm25_data = {}
+    return _bm25_data
+
+
 # ─────────────────────────────────────────────────────────────────────────── #
 #  Data classes                                                               #
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -95,11 +112,12 @@ class ClaimResult:
 class LayerResult:
     consistency_score: float    # [0,1]  higher = more consistent = less risky
     consistency_risk:  float    # [0,1]  1 - consistency (used for aggregation)
-    retrieval_score:   float    # [0,1]  cosine sim of answer vs. best KB doc
+    retrieval_score:   float    # [0,1]  hybrid BM25+cosine sim vs. best KB doc
     retrieval_risk:    float    # [0,1]  1 - retrieval_score
     critic_entailment: float    # [0,1]  NLI entailment prob (higher = supported)
     critic_risk:       float    # [0,1]  1 - critic_entailment
     temporal_risk:     float    # [0,1]  1.0 if future-year claim detected
+    entity_risk:       float    = 0.0   # [0,1]  fraction of key terms missing from evidence
     claim_breakdown:   List[ClaimResult] = field(default_factory=list)
     samples:           List[str] = field(default_factory=list)
     citations:         List[Dict] = field(default_factory=list)
@@ -192,13 +210,50 @@ def layer1_consistency(question: str) -> Tuple[str, List[str], float]:
 #  Layer 2 — Retrieval Verification                                          #
 # ─────────────────────────────────────────────────────────────────────────── #
 
+def _hybrid_scores(
+    query: str, distances: np.ndarray, indices: np.ndarray, meta: List[Dict]
+) -> List[Tuple[float, int]]:
+    """
+    Combine FAISS cosine similarities with BM25 lexical scores.
+    Returns list of (hybrid_score, meta_index) sorted descending.
+    """
+    bm25_data = _get_bm25()
+    bm25_boost: Dict[int, float] = {}
+    if bm25_data and "bm25" in bm25_data:
+        tokens = query.lower().split()
+        raw_scores = bm25_data["bm25"].get_scores(tokens)   # all KB docs
+        bm25_max = float(raw_scores.max())
+        if bm25_max > 0:
+            for idx in indices[0]:
+                if 0 <= int(idx) < len(raw_scores):
+                    bm25_boost[int(idx)] = float(raw_scores[int(idx)]) / bm25_max
+
+    w = config.BM25_WEIGHT if bm25_boost else 0.0
+    candidates: List[Tuple[float, int]] = []
+    for dist, idx in zip(distances[0], indices[0]):
+        if idx < 0 or idx >= len(meta):
+            continue
+        cosine = float(dist)
+        bm25_s = bm25_boost.get(int(idx), 0.0)
+        hybrid = (1.0 - w) * cosine + w * bm25_s
+        candidates.append((hybrid, int(idx)))
+
+    candidates.sort(reverse=True)
+    return candidates
+
+
 def layer2_retrieval(answer: str) -> Tuple[float, List[Dict]]:
     """
-    Embed the LLM answer and retrieve top-k documents from the KB.
-    Compute cosine similarity as the retrieval alignment score.
+    Embed the LLM answer and retrieve top-k documents from the KB using
+    hybrid BM25 + cosine similarity scoring.
+
+    Strategy:
+      1. FAISS fetches BM25_CANDIDATES (20) nearest neighbours by cosine sim.
+      2. BM25 lexical scores are computed for those candidates and blended in.
+      3. Top-k by hybrid score are returned as citations.
 
     Returns:
-        retrieval_score  — [0, 1] similarity to best document
+        retrieval_score  — [0, 1] hybrid score of best document
         citations        — Top-k retrieved docs
     """
     index, meta = _get_kb()
@@ -208,32 +263,32 @@ def layer2_retrieval(answer: str) -> Tuple[float, List[Dict]]:
         [answer], normalize_embeddings=True, convert_to_numpy=True
     ).astype(np.float32)
 
-    distances, indices = index.search(answer_emb, config.TOP_K)
+    n_candidates = max(config.TOP_K, config.BM25_CANDIDATES)
+    distances, indices = index.search(answer_emb, n_candidates)
+
+    candidates = _hybrid_scores(answer, distances, indices, meta)
+    candidates = candidates[:config.TOP_K]
 
     citations: List[Dict] = []
     sims: List[float] = []
-
-    for dist, idx in zip(distances[0], indices[0]):
-        if idx < 0 or idx >= len(meta):
-            continue
-        sim = float(dist)
-        sims.append(sim)
+    for hybrid, idx in candidates:
+        sims.append(hybrid)
         doc = meta[idx]
         citations.append({
-            "source"  : doc.get("source", "KB"),
-            "question": doc.get("question", ""),
-            "answer"  : doc.get("answer", "")[:200],
-            "similarity": round(sim, 4),
+            "source"    : doc.get("source", "KB"),
+            "question"  : doc.get("question", ""),
+            "answer"    : doc.get("answer", "")[:200],
+            "similarity": round(hybrid, 4),
         })
 
     retrieval_score = float(max(sims)) if sims else 0.0
-    logger.info(f"Layer 2 — Top similarity: {retrieval_score:.3f}")
+    logger.info(f"Layer 2 — Hybrid top score: {retrieval_score:.3f}")
     return retrieval_score, citations
 
 
 def layer2_retrieval_single(query: str) -> Tuple[float, List[Dict]]:
     """
-    Retrieve top-k KB documents for a single query string.
+    Retrieve top-k KB documents for a single query string using hybrid scoring.
     Used for per-claim retrieval in the claim decomposition loop.
     """
     index, meta = _get_kb()
@@ -243,25 +298,121 @@ def layer2_retrieval_single(query: str) -> Tuple[float, List[Dict]]:
         [query], normalize_embeddings=True, convert_to_numpy=True
     ).astype(np.float32)
 
-    distances, indices = index.search(query_emb, config.TOP_K)
+    n_candidates = max(config.TOP_K, config.BM25_CANDIDATES)
+    distances, indices = index.search(query_emb, n_candidates)
+
+    candidates = _hybrid_scores(query, distances, indices, meta)
+    candidates = candidates[:config.TOP_K]
 
     citations: List[Dict] = []
     sims: List[float] = []
-    for dist, idx in zip(distances[0], indices[0]):
-        if idx < 0 or idx >= len(meta):
-            continue
-        sim = float(dist)
-        sims.append(sim)
+    for hybrid, idx in candidates:
+        sims.append(hybrid)
         doc = meta[idx]
         citations.append({
             "source"    : doc.get("source", "KB"),
             "question"  : doc.get("question", ""),
             "answer"    : doc.get("answer", "")[:200],
-            "similarity": round(sim, 4),
+            "similarity": round(hybrid, 4),
         })
 
     retrieval_score = float(max(sims)) if sims else 0.0
     return retrieval_score, citations
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+#  Layer 2b — Medical Entity Overlap Check                                   #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+# Common pharmaceutical name suffixes — identify drug mentions reliably
+_DRUG_SUFFIX_RE = re.compile(
+    r"\b\w{4,}(?:olol|opril|sartan|statin|azide|mycin|cillin|oxacin"
+    r"|zepam|azine|tidine|lukast|triptan|dronate|mab|\bnib|zumab|prazole"
+    r"|cycline|vir\b|navir|mivir|tidine)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_medical_terms(text: str) -> List[str]:
+    """
+    Lightweight extraction of candidate medical entities from text.
+    Uses regex patterns for:
+      - Drug names  (common pharmaceutical name suffixes)
+      - Dosage patterns  (500 mg, 10 mL, 250 mcg)
+      - Uppercase acronyms  (SSRI, ACE, NSAID, COPD)
+      - Capitalised multi-word noun phrases  (Metformin, Warfarin, Type 2 Diabetes)
+    """
+    terms: List[str] = []
+
+    # Drug suffix pattern
+    terms.extend(m.group().lower() for m in _DRUG_SUFFIX_RE.finditer(text))
+
+    # Dosage patterns: numbers + units
+    terms.extend(
+        m.group().lower()
+        for m in re.finditer(
+            r"\b\d+(?:\.\d+)?\s*(?:mg|mcg|ug|ml|mmol|g\b|units?|iu)\b",
+            text, re.IGNORECASE,
+        )
+    )
+
+    # All-caps acronyms 2–6 chars
+    terms.extend(m.group().lower() for m in re.finditer(r"\b[A-Z]{2,6}\b", text))
+
+    # Capitalised words (likely proper nouns / named entities)
+    terms.extend(
+        m.group().lower()
+        for m in re.finditer(r"\b[A-Z][a-z]{3,}\b", text)
+    )
+
+    # Deduplicate, drop single-char tokens
+    seen: set = set()
+    result: List[str] = []
+    for t in terms:
+        t = t.strip()
+        if len(t) >= 3 and t not in seen:
+            seen.add(t)
+            result.append(t)
+    return result
+
+
+def layer2b_entity_check(answer: str, citations: List[Dict]) -> float:
+    """
+    Entity overlap check (Layer 2b).
+
+    Hallucinated answers often introduce plausible-sounding entities (wrong
+    drug names, fabricated diagnoses) that simply do not appear in the
+    retrieved KB evidence — because the evidence discusses the *correct*
+    entities instead.
+
+    For every key medical term extracted from the answer, we check whether it
+    appears anywhere in the pooled citation text.  The fraction of missing
+    terms becomes the entity_risk signal.
+
+    Returns:
+        entity_risk  — [0, 1], 0 = all terms found, 1 = no terms found.
+    """
+    if not config.ENTITY_CHECK or not citations:
+        return 0.0
+
+    answer_terms = extract_medical_terms(answer)
+    if len(answer_terms) < config.ENTITY_MIN_TERMS:
+        return 0.0   # not enough identifiable terms — skip
+
+    # Pool all citation text (lower-cased for matching)
+    evidence_text = " ".join(
+        (cit.get("answer", "") + " " + cit.get("question", "")).lower()
+        for cit in citations
+    )
+
+    missing = [t for t in answer_terms if t not in evidence_text]
+    entity_risk = len(missing) / len(answer_terms)
+
+    logger.info(
+        f"Layer 2b — {len(answer_terms)} terms, {len(missing)} missing from evidence "
+        f"→ entity_risk={entity_risk:.3f}"
+    )
+    return round(entity_risk, 4)
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -499,6 +650,7 @@ def aggregate(
     retrieval: float,
     critic: float,
     temporal_risk: float = 0.0,
+    entity_risk: float = 0.0,
 ) -> Tuple[float, str]:
     """
     Combine the three detection signals into a final risk score.
@@ -522,9 +674,10 @@ def aggregate(
     critic_risk      = 1.0 - critic
 
     risk_score = (
-        w["consistency"] * consistency_risk
-        + w["retrieval"]  * retrieval_risk
-        + w["critic"]     * critic_risk
+        w["consistency"]       * consistency_risk
+        + w["retrieval"]       * retrieval_risk
+        + w["critic"]         * critic_risk
+        + w.get("entity", 0.0) * entity_risk
     )
     risk_score = float(np.clip(risk_score, 0.0, 1.0))
 
@@ -567,9 +720,10 @@ def _build_explanation(
     }[flag]
 
     concerns = {
-        "self-consistency" : layers.consistency_risk,
+        "self-consistency"  : layers.consistency_risk,
         "evidence retrieval": layers.retrieval_risk,
-        "NLI entailment"   : layers.critic_risk,
+        "NLI entailment"    : layers.critic_risk,
+        "entity overlap"    : layers.entity_risk,
     }
     dominant = max(concerns, key=concerns.get)
     explanation = f"{base}  |  Primary signal: {dominant} (risk={concerns[dominant]:.2f})"
@@ -598,6 +752,9 @@ def predict(question: str) -> PredictionResult:
     # Layer 2 — Whole-answer retrieval (for global citations + display)
     retrieval_score, citations = layer2_retrieval(answer)
 
+    # Layer 2b — Entity overlap check (catches wrong-entity hallucinations)
+    entity_risk = layer2b_entity_check(answer, citations)
+
     # Layer 3 — Per-claim NLI with per-claim KB retrieval (FACTSCORE-style)
     critic_entailment, claim_results = layer3_critic(
         answer, citations, question=question
@@ -607,9 +764,9 @@ def predict(question: str) -> PredictionResult:
     claims               = decompose_claims(answer)
     temporal_risk, temporal_flags = detect_temporal_claims(claims)
 
-    # Final aggregation (includes temporal hard-override)
+    # Final aggregation (includes temporal + entity hard-override)
     risk_score, risk_flag = aggregate(
-        consistency, retrieval_score, critic_entailment, temporal_risk
+        consistency, retrieval_score, critic_entailment, temporal_risk, entity_risk
     )
 
     layers = LayerResult(
@@ -620,6 +777,7 @@ def predict(question: str) -> PredictionResult:
         critic_entailment = critic_entailment,
         critic_risk       = 1.0 - critic_entailment,
         temporal_risk     = temporal_risk,
+        entity_risk       = entity_risk,
         claim_breakdown   = claim_results,
         samples           = samples,
         citations         = citations,
@@ -643,6 +801,7 @@ def predict(question: str) -> PredictionResult:
             "consistency_score" : round(consistency, 4),
             "retrieval_score"   : round(retrieval_score, 4),
             "nli_entailment"    : round(critic_entailment, 4),
+            "entity_risk"       : round(entity_risk, 4),
             "consistency_risk"  : round(layers.consistency_risk, 4),
             "retrieval_risk"    : round(layers.retrieval_risk, 4),
             "critic_risk"       : round(layers.critic_risk, 4),

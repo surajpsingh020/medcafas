@@ -43,7 +43,7 @@ from sklearn.metrics import (
 )
 
 import config
-from pipeline import layer2_retrieval, layer3_critic, aggregate, _get_embedder, _get_kb, _get_nli_model
+from pipeline import layer2_retrieval, layer3_critic, aggregate, layer2b_entity_check, _get_embedder, _get_kb, _get_nli_model, _get_bm25
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -64,6 +64,7 @@ class EvalResult:
     risk_flag:   str
     retrieval:   float
     critic:      float
+    entity:      float
     predicted_hallucinated: bool   # True if flag != LOW
     correct:     bool
 
@@ -75,17 +76,19 @@ class EvalResult:
 def eval_no_llm(sample: EvalSample) -> EvalResult:
     """
     Skips Layer 1 (self-consistency / Ollama).
-    Directly feeds the known answer through Layer 2 + Layer 3.
+    Directly feeds the known answer through Layer 2 + 2b + Layer 3.
     Consistency is set to 1.0 (neutral) so it doesn't skew results.
     Fast: ~1-2s per sample on CPU.
     """
     retrieval_score, citations = layer2_retrieval(sample.answer)
+    entity_risk = layer2b_entity_check(sample.answer, citations)
     # layer3_critic now returns (score, claim_results) tuple
     critic_score, _ = layer3_critic(sample.answer, citations, question=sample.question)
 
     # Neutral consistency (1.0 = not penalising, isolates retrieval+NLI signal)
     consistency = 1.0
-    risk_score, risk_flag = aggregate(consistency, retrieval_score, critic_score)
+    risk_score, risk_flag = aggregate(consistency, retrieval_score, critic_score,
+                                      entity_risk=entity_risk)
 
     predicted_hallucinated = risk_flag != "LOW"
     correct = predicted_hallucinated == sample.is_hallucinated
@@ -96,6 +99,7 @@ def eval_no_llm(sample: EvalSample) -> EvalResult:
         risk_flag=risk_flag,
         retrieval=retrieval_score,
         critic=critic_score,
+        entity=entity_risk,
         predicted_hallucinated=predicted_hallucinated,
         correct=correct,
     )
@@ -122,6 +126,7 @@ def eval_with_llm(sample: EvalSample) -> EvalResult:
         risk_flag=result.risk_flag,
         retrieval=result.breakdown["retrieval_score"],
         critic=result.breakdown["nli_entailment"],
+        entity=result.breakdown.get("entity_risk", 0.0),
         predicted_hallucinated=predicted_hallucinated,
         correct=correct,
     )
@@ -309,10 +314,67 @@ def load_eval_samples_pubmedqa(n: int = 100) -> List[EvalSample]:
     return samples
 
 
+def load_eval_samples_llm(n: int = 40) -> List[EvalSample]:
+    """
+    GOLD STANDARD EVAL: actual phi3.5 outputs labeled by NLI vs PubMedQA ground truth.
 
-# ─────────────────────────────────────────────────────────────────────────── #
-#  Calibration — Expected Calibration Error (ECE)                           #
-# ─────────────────────────────────────────────────────────────────────────── #
+    For each PubMedQA question:
+      1. Ask phi3.5 the question (via Ollama)
+      2. Use NLI to compare phi3.5's answer to the correct long_answer
+      3. If entailment < 0.30 → label as hallucinated
+
+    This tests the real use case: detecting actual LLM hallucinations in
+    paragraph-length medical answers.  Requires Ollama running.  Cannot be
+    used with --no-llm.
+    """
+    from pipeline import _ask_ollama
+
+    print("Loading PubMedQA for LLM-output eval (requires Ollama)...")
+    try:
+        ds = load_dataset("qiaojin/PubMedQA", "pqa_labeled", split="train")
+    except Exception as e:
+        print(f"   PubMedQA load failed: {e}")
+        return load_eval_samples(n)
+
+    print(f"   {len(ds)} total rows available")
+
+    nli = _get_nli_model()
+    samples: List[EvalSample] = []
+    target = n if n > 0 else len(ds)
+
+    for row in ds:
+        if len(samples) >= target:
+            break
+        q            = (row.get("question")    or "").strip()
+        ground_truth = (row.get("long_answer") or "").strip()
+        if not q or len(ground_truth.split()) < 10:
+            continue
+
+        print(f"   [{len(samples)+1}/{target}] LLM: {q[:55]}...", end=" ", flush=True)
+        try:
+            llm_answer = _ask_ollama(q)
+        except Exception as e:
+            print(f"SKIP ({e})")
+            continue
+
+        # NLI: does the ground truth entail the LLM answer?
+        try:
+            nli_scores = nli.predict(
+                [(ground_truth[:512], llm_answer[:512])], apply_softmax=True
+            )
+            entailment = float(nli_scores[0][1])
+        except Exception:
+            entailment = 0.5
+
+        is_hall = entailment < 0.30   # LLM said something different from ground truth
+        print(f"ent={entailment:.2f} -> {'HALL' if is_hall else 'OK'}")
+        samples.append(EvalSample(question=q, answer=llm_answer, is_hallucinated=is_hall))
+
+    hall_n = sum(s.is_hallucinated for s in samples)
+    print(f"   {len(samples)} LLM samples ({len(samples)-hall_n} correct, {hall_n} hallucinated)")
+    return samples
+
+
 
 def compute_ece(results: List[EvalResult], n_bins: int = 10) -> float:
     """
@@ -463,10 +525,15 @@ def print_metrics(results: List[EvalResult], show_ci: bool = False) -> None:
     hal_nli  = [r.critic    for r in results if r.sample.is_hallucinated]
     good_nli = [r.critic    for r in results if not r.sample.is_hallucinated]
 
+    hal_ent  = [r.entity   for r in results if r.sample.is_hallucinated]
+    good_ent = [r.entity   for r in results if not r.sample.is_hallucinated]
+
     print("\n  Layer Score Distributions (mean +/- std):")
     print(f"  {'':25}  {'Correct':>12}  {'Hallucinated':>12}")
     print(f"  {'Retrieval score':25}  {np.mean(good_ret):>6.3f} +/- {np.std(good_ret):.3f}  {np.mean(hal_ret):>6.3f} +/- {np.std(hal_ret):.3f}")
     print(f"  {'NLI entailment':25}  {np.mean(good_nli):>6.3f} +/- {np.std(good_nli):.3f}  {np.mean(hal_nli):>6.3f} +/- {np.std(hal_nli):.3f}")
+    if good_ent and hal_ent:
+        print(f"  {'Entity risk':25}  {np.mean(good_ent):>6.3f} +/- {np.std(good_ent):.3f}  {np.mean(hal_ent):>6.3f} +/- {np.std(hal_ent):.3f}")
 
     # Error analysis
     errors = [r for r in results if not r.correct]
@@ -536,10 +603,12 @@ def main():
                         help="Save detailed results to this JSON file.")
     parser.add_argument(
         "--dataset", type=str, default="medqa",
-        choices=["medqa", "pubmedqa"],
+        choices=["medqa", "pubmedqa", "llm"],
         help=(
             "Eval dataset.  'medqa' = MedQA-USMLE (short MCQ answers, tests retrieval)."
             "  'pubmedqa' = PubMedQA long_answer (full sentences, proper NLI test)."
+            "  'llm' = actual phi3.5 outputs labeled by NLI vs PubMedQA ground truth"
+            " (gold standard, requires Ollama, cannot be used with --no-llm)."
             "  Default: medqa"
         ),
     )
@@ -547,11 +616,16 @@ def main():
 
     # Pre-load singletons before timed loop
     print("\nPre-loading models...")
-    _get_embedder(); _get_kb(); _get_nli_model()
+    _get_embedder(); _get_kb(); _get_nli_model(); _get_bm25()
     print("    Models ready.\n")
 
     if args.dataset == "pubmedqa":
         samples = load_eval_samples_pubmedqa(args.samples)
+    elif args.dataset == "llm":
+        if args.no_llm:
+            print("ERROR: --dataset llm requires Ollama (cannot be combined with --no-llm).")
+            return
+        samples = load_eval_samples_llm(args.samples)
     else:
         samples = load_eval_samples(args.samples)
     eval_fn = eval_no_llm if args.no_llm else eval_with_llm
@@ -589,6 +663,7 @@ def main():
                 "risk_score":      r.risk_score,
                 "retrieval":       r.retrieval,
                 "nli_critic":      r.critic,
+                "entity_risk":     r.entity,
                 "correct":         r.correct,
             }
             for r in results
