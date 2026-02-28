@@ -94,7 +94,7 @@ def _eval_no_nli(sample: EvalSample) -> EvalResult:
     # Replace critic with neutral 0.5
     critic_score = 0.5
     consistency = 1.0
-    risk_score, risk_flag = aggregate(consistency, retrieval_score, critic_score,
+    risk_score, risk_flag, _ = aggregate(consistency, retrieval_score, critic_score,
                                       entity_risk=entity_risk)
     predicted_hallucinated = risk_flag == "HIGH"
     correct = predicted_hallucinated == sample.is_hallucinated
@@ -116,7 +116,7 @@ def _eval_nli_only(sample: EvalSample) -> EvalResult:
     orig_weights = config.WEIGHTS.copy()
     config.WEIGHTS = {"consistency": 0.0, "retrieval": 0.0, "critic": 1.0, "entity": 0.0}
     try:
-        risk_score, risk_flag = aggregate(consistency, 0.5, critic_score, entity_risk=entity_risk)
+        risk_score, risk_flag, _ = aggregate(consistency, 0.5, critic_score, entity_risk=entity_risk)
     finally:
         config.WEIGHTS = orig_weights
     predicted_hallucinated = risk_flag == "HIGH"

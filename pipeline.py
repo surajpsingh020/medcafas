@@ -881,6 +881,27 @@ def aggregate(
             )
             critic = gate_floor
 
+    # ── Safety Buffer (High-Conflict Detection) ──────────────────────────
+    # When the LLM is confident but Retrieval+NLI strongly disagree,
+    # flag as HIGH-RISK/INCONCLUSIVE.  This catches fluent but wrong answers.
+    safety_buffer_triggered = False
+    if (getattr(config, 'SAFETY_BUFFER_ENABLED', False)
+            and consistency_is_real):
+        evidence_support = (retrieval + critic) / 2.0
+        conflict_gap = consistency - evidence_support
+        conflict_thresh = getattr(config, 'SAFETY_BUFFER_CONFLICT', 0.40)
+        min_gap = getattr(config, 'SAFETY_BUFFER_MIN_GAP', 0.30)
+
+        if (conflict_gap >= conflict_thresh
+                and consistency >= 0.80
+                and evidence_support < (1.0 - min_gap)):
+            safety_buffer_triggered = True
+            logger.info(
+                f"Aggregate — Safety buffer triggered: "
+                f"consistency={consistency:.3f} vs evidence_support={evidence_support:.3f} "
+                f"(gap={conflict_gap:.3f} >= {conflict_thresh})"
+            )
+
     consistency_risk = 1.0 - consistency
     retrieval_risk   = 1.0 - retrieval
     critic_risk      = 1.0 - critic
@@ -909,6 +930,10 @@ def aggregate(
             logger.info("Aggregate — Temporal override triggered (future-year claim detected)")
         if hard_override:
             logger.info("Aggregate — Hard override triggered (retrieval+critic both failed)")
+    elif safety_buffer_triggered:
+        flag       = "HIGH"
+        risk_score = max(risk_score, config.RISK_HIGH + 0.01)
+        logger.info("Aggregate — Safety buffer override: LLM-evidence conflict → HIGH")
     elif risk_score < config.RISK_LOW:
         flag = "LOW"
     elif risk_score < config.RISK_HIGH:
@@ -916,7 +941,7 @@ def aggregate(
     else:
         flag = "HIGH"
 
-    return risk_score, flag
+    return risk_score, flag, safety_buffer_triggered
 
 
 def _build_explanation(
@@ -924,12 +949,16 @@ def _build_explanation(
     risk: float,
     layers: LayerResult,
     temporal_flags: List[Dict],
+    safety_buffer: bool = False,
 ) -> str:
     base = {
         "LOW"    : "✅ Answer appears well-supported. Low hallucination risk.",
         "CAUTION": "⚠️  Some uncertainty detected. Review before clinical use.",
         "HIGH"   : "🚨 High hallucination risk. Do NOT use without expert verification.",
     }[flag]
+
+    if safety_buffer:
+        base = "🚨 HIGH CONFLICT: LLM is confident but evidence does not support the answer. Treat as inconclusive."
 
     concerns = {
         "self-consistency"  : layers.consistency_risk,
@@ -976,8 +1005,8 @@ def predict(question: str) -> PredictionResult:
     claims               = decompose_claims(answer)
     temporal_risk, temporal_flags = detect_temporal_claims(claims)
 
-    # Final aggregation (includes temporal + entity hard-override)
-    risk_score, risk_flag = aggregate(
+    # Final aggregation (includes temporal + entity hard-override + safety buffer)
+    risk_score, risk_flag, safety_buffer_fired = aggregate(
         consistency, retrieval_score, critic_entailment, temporal_risk, entity_risk
     )
 
@@ -1008,7 +1037,7 @@ def predict(question: str) -> PredictionResult:
         risk_score  = round(risk_score, 4),
         risk_flag   = risk_flag,
         confidence  = round(1.0 - risk_score, 4),
-        explanation = _build_explanation(risk_flag, risk_score, layers, temporal_flags),
+        explanation = _build_explanation(risk_flag, risk_score, layers, temporal_flags, safety_buffer=safety_buffer_fired),
         breakdown   = {
             "consistency_score" : round(consistency, 4),
             "retrieval_score"   : round(retrieval_score, 4),

@@ -8,7 +8,7 @@ OLLAMA_BASE_URL  = "http://localhost:11434"
 OLLAMA_MODEL     = "phi3.5:latest"          # ~2.2GB, fast on CPU. Alternatives: llama3.2:1b, mistral
 
 # ── Embeddings ────────────────────────────────────────────────────────────────
-EMBEDDING_MODEL  = "all-MiniLM-L6-v2"   # 80MB, very CPU-friendly
+EMBEDDING_MODEL  = "michiyasunaga/BioLinkBERT-base"  # 768-dim, biomedical domain pre-trained
 
 # ── Knowledge Base / FAISS ────────────────────────────────────────────────────
 KB_INDEX_PATH    = "data/kb.index"
@@ -77,6 +77,15 @@ WEIGHTS = {
 # to prevent the noisy NLI from over-ruling a confident LLM.
 CONFIDENCE_GATE_THRESH = 0.92   # consistency above this → trust LLM, use retrieval-only
 CONFIDENCE_GATE_NLI_FLOOR = 0.60  # when gate fires, set NLI score to at least this
+
+# ── Safety Buffer (High-Conflict Detection) ──────────────────────────────────
+# When Layer 1 (LLM) and Layer 2+3 (Retrieval/NLI) strongly disagree, the
+# answer is flagged as HIGH-RISK/INCONCLUSIVE regardless of the weighted score.
+# This catches scenarios where a confident LLM produces fluent but wrong answers
+# that the retrieval/NLI layers detect as unsupported.
+SAFETY_BUFFER_ENABLED   = True
+SAFETY_BUFFER_CONFLICT  = 0.40   # |consistency - avg(retrieval, NLI)| above this → conflict
+SAFETY_BUFFER_MIN_GAP   = 0.30   # minimum gap between LLM confidence and evidence support
 
 RISK_LOW     = 0.20          # Below → 🟢 LOW  (tuned on PubMedQA 100-sample raw scores)
 RISK_HIGH    = 0.30          # Above → 🔴 HIGH  (between → 🟡 CAUTION)

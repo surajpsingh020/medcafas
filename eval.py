@@ -89,7 +89,7 @@ def eval_no_llm(sample: EvalSample) -> EvalResult:
 
     # Neutral consistency (1.0 = not penalising, isolates retrieval+NLI signal)
     consistency = 1.0
-    risk_score, risk_flag = aggregate(consistency, retrieval_score, critic_score,
+    risk_score, risk_flag, _ = aggregate(consistency, retrieval_score, critic_score,
                                       entity_risk=entity_risk)
 
     # CAUTION means the model is uncertain — not a confident hallucination call.

@@ -1,0 +1,21 @@
+\begin{table}[htbp]
+\centering
+\caption{MedCAFAS System Health — Cross-Dataset Evaluation (No-LLM (Layers 2+3))}
+\label{tab:system_health}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{PubMedQA} & \textbf{MedQA} \\
+\midrule
+Accuracy & 0.733 & 0.533 \\
+Precision & 0.792 & 0.542 \\
+Recall (Hall.) & 0.633 & 0.433 \\
+F1 Score & 0.704 & 0.481 \\
+ROC-AUC & 0.818 & 0.543 \\
+ECE ($\downarrow$) & 0.283 & 0.224 \\
+\# Samples & 60 & 60 \\
+\midrule
+Accuracy 95\% CI & [0.617, 0.833] & [0.400, 0.667] \\
+F1 95\% CI & [0.558, 0.828] & [0.286, 0.623] \\
+\bottomrule
+\end{tabular}
+\end{table}
