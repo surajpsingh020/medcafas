@@ -38,16 +38,21 @@ CONSISTENCY_RISK_THRESHOLD = 0.65   # Below this → inconsistent → risky
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 TOP_K            = 3                 # Retrieve top-3 docs
 MIN_SIM          = 0.40              # Below this cosine similarity → retrieval failed
+MMR_LAMBDA       = 0.85             # Max-Marginal Relevance: 1.0 = pure relevance, 0.0 = pure diversity
+MMR_CANDIDATES   = 20               # How many FAISS candidates to consider before MMR re-ranking
 
 # ── NLI Critic ────────────────────────────────────────────────────────────────
 NLI_MODEL        = "cross-encoder/nli-deberta-v3-base"    # ~180MB, MNLI-acc=90.04% (was: small ~84%)
 NLI_BATCH_SIZE   = 8
 
-# ── Semantic Similarity Safety Net ────────────────────────────────────────────
+# ── Semantic Similarity Safety Net (Temperature-Scaled) ──────────────────────
 # When retrieval cosine similarity >= this threshold but NLI gives "neutral",
-# boost the entailment score.  Handles paraphrased LLM answers that are
-# factually correct but phrased differently from KB evidence.
-SEM_SIM_SUPPORT_THRESH = 0.70   # cosine sim above which the boost activates
+# apply softmax temperature scaling on NLI logits to let entailment rise.
+# Handles paraphrased LLM answers that are factually correct but phrased
+# differently from KB evidence.
+SEM_SIM_SUPPORT_THRESH = 0.90   # cosine sim above which temp-scaling activates
+NLI_TEMP_SCALE_HIGH    = 0.60   # temperature when sim >= 0.98 (aggressive squash)
+NLI_TEMP_SCALE_LOW     = 0.85   # temperature when sim ~= 0.90 (gentle squash)
 
 # Minimum claim length for NLI scoring.  Cross-encoder NLI models produce
 # near-zero entailment for short noun phrases (e.g. "Cholesterol embolization")
@@ -66,6 +71,12 @@ WEIGHTS = {
     "critic"      : 0.30,   # NLI entailment score (claim vs. evidence)
     "entity"      : 0.15,   # Fraction of answer entities absent from retrieved evidence
 }
+
+# ── Confidence Gate ───────────────────────────────────────────────────────────
+# If Layer 1 consistency is very high (LLM is confident), bypass NLI critic
+# to prevent the noisy NLI from over-ruling a confident LLM.
+CONFIDENCE_GATE_THRESH = 0.92   # consistency above this → trust LLM, use retrieval-only
+CONFIDENCE_GATE_NLI_FLOOR = 0.60  # when gate fires, set NLI score to at least this
 
 RISK_LOW     = 0.20          # Below → 🟢 LOW  (tuned on PubMedQA 100-sample raw scores)
 RISK_HIGH    = 0.30          # Above → 🔴 HIGH  (between → 🟡 CAUTION)

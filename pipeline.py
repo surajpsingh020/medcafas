@@ -242,6 +242,88 @@ def _hybrid_scores(
     return candidates
 
 
+def _mmr_rerank(
+    query_emb: np.ndarray,
+    candidates: List[Tuple[float, int]],
+    meta: List[Dict],
+    top_k: int,
+    lam: float,
+) -> List[Tuple[float, int]]:
+    """
+    Max-Marginal Relevance (MMR) re-ranking to diversify retrieved evidence.
+
+    Reduces redundancy in top-k results by penalising candidates that are
+    too similar to already-selected documents.  This ensures the NLI critic
+    sees diverse evidence rather than three variations of the same paragraph,
+    directly addressing the FN-Ret error pattern (88.9% of errors).
+
+    MMR(d) = λ · Relevance(d, q) - (1-λ) · max_selected Sim(d, s)
+
+    Args:
+        query_emb  – normalised embedding of the query (1, dim)
+        candidates – (hybrid_score, meta_idx) sorted by relevance
+        meta       – KB metadata for passage text
+        top_k      – how many to select
+        lam        – trade-off: 1.0 = pure relevance, 0.0 = pure diversity
+
+    Returns:
+        Re-ranked list of (hybrid_score, meta_idx) of length top_k.
+    """
+    if len(candidates) <= top_k:
+        return candidates
+
+    embedder = _get_embedder()
+
+    # Embed all candidate passages once
+    passages = []
+    for _, idx in candidates:
+        doc = meta[idx]
+        passages.append(doc.get("answer", "") or doc.get("question", ""))
+    cand_embs = embedder.encode(passages, normalize_embeddings=True,
+                                convert_to_numpy=True).astype(np.float32)
+
+    # Relevance scores normalised to [0, 1]
+    rel_scores = np.array([sc for sc, _ in candidates], dtype=np.float32)
+    max_rel = rel_scores.max() if rel_scores.max() > 0 else 1.0
+    rel_norm = rel_scores / max_rel
+
+    selected_indices: List[int] = []   # positions within `candidates`
+    selected_embs: List[np.ndarray] = []
+
+    for _ in range(top_k):
+        best_idx = -1
+        best_mmr = -float("inf")
+
+        for i in range(len(candidates)):
+            if i in selected_indices:
+                continue
+
+            relevance = rel_norm[i]
+
+            # Max similarity to already-selected docs
+            if selected_embs:
+                sims = cosine_similarity(
+                    cand_embs[i:i+1], np.array(selected_embs)
+                )[0]
+                max_sim = float(sims.max())
+            else:
+                max_sim = 0.0
+
+            mmr = lam * relevance - (1.0 - lam) * max_sim
+
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = i
+
+        if best_idx < 0:
+            break
+
+        selected_indices.append(best_idx)
+        selected_embs.append(cand_embs[best_idx])
+
+    return [candidates[i] for i in selected_indices]
+
+
 def layer2_retrieval(answer: str) -> Tuple[float, List[Dict]]:
     """
     Embed the LLM answer and retrieve top-k documents from the KB using
@@ -263,11 +345,17 @@ def layer2_retrieval(answer: str) -> Tuple[float, List[Dict]]:
         [answer], normalize_embeddings=True, convert_to_numpy=True
     ).astype(np.float32)
 
-    n_candidates = max(config.TOP_K, config.BM25_CANDIDATES)
+    n_candidates = max(config.TOP_K, getattr(config, 'MMR_CANDIDATES', config.BM25_CANDIDATES))
     distances, indices = index.search(answer_emb, n_candidates)
 
     candidates = _hybrid_scores(answer, distances, indices, meta)
-    candidates = candidates[:config.TOP_K]
+
+    # MMR re-ranking: diversify evidence so NLI sees varied perspectives
+    lam = getattr(config, 'MMR_LAMBDA', 1.0)
+    if lam < 1.0:
+        candidates = _mmr_rerank(answer_emb, candidates, meta, config.TOP_K, lam)
+    else:
+        candidates = candidates[:config.TOP_K]
 
     citations: List[Dict] = []
     sims: List[float] = []
@@ -288,7 +376,8 @@ def layer2_retrieval(answer: str) -> Tuple[float, List[Dict]]:
 
 def layer2_retrieval_single(query: str) -> Tuple[float, List[Dict]]:
     """
-    Retrieve top-k KB documents for a single query string using hybrid scoring.
+    Retrieve top-k KB documents for a single query string using hybrid scoring
+    with MMR diversity re-ranking.
     Used for per-claim retrieval in the claim decomposition loop.
     """
     index, meta = _get_kb()
@@ -298,11 +387,17 @@ def layer2_retrieval_single(query: str) -> Tuple[float, List[Dict]]:
         [query], normalize_embeddings=True, convert_to_numpy=True
     ).astype(np.float32)
 
-    n_candidates = max(config.TOP_K, config.BM25_CANDIDATES)
+    n_candidates = max(config.TOP_K, getattr(config, 'MMR_CANDIDATES', config.BM25_CANDIDATES))
     distances, indices = index.search(query_emb, n_candidates)
 
     candidates = _hybrid_scores(query, distances, indices, meta)
-    candidates = candidates[:config.TOP_K]
+
+    # MMR re-ranking for per-claim retrieval too
+    lam = getattr(config, 'MMR_LAMBDA', 1.0)
+    if lam < 1.0:
+        candidates = _mmr_rerank(query_emb, candidates, meta, config.TOP_K, lam)
+    else:
+        candidates = candidates[:config.TOP_K]
 
     citations: List[Dict] = []
     sims: List[float] = []
@@ -556,15 +651,17 @@ def layer3_critic(
 ) -> Tuple[float, List[ClaimResult]]:
     """
     FACTSCORE-style per-claim NLI analysis with per-claim KB retrieval
-    and a semantic-similarity safety net.
+    and softmax temperature scaling for paraphrase handling.
 
     For each atomic claim decomposed from the answer:
       1. Retrieve the best-matching KB documents for *that specific claim*.
-      2. Run NLI (cross-encoder) to get entailment + contradiction probabilities.
-      3. **New**: If retrieval similarity is very high (>= SEM_SIM_SUPPORT_THRESH)
-         but NLI reports neutral/unsupported, boost the score.  This handles
-         paraphrased LLM answers that are factually correct but expressed
-         differently from KB evidence — the #1 cause of false positives.
+      2. Run NLI (cross-encoder) to get raw logits.
+      3. **Temperature Scaling**: If retrieval similarity is very high
+         (>= SEM_SIM_SUPPORT_THRESH) but NLI reports neutral, apply a lower
+         softmax temperature to the NLI logits.  This "squashes" the neutral
+         and contradiction probabilities so entailment naturally rises.
+         Unlike the previous flat boost, this preserves the relative ordering
+         of the NLI logits and only amplifies the model's existing signal.
       4. Assign a verdict: SUPPORTED / UNSUPPORTED / CONTRADICTED.
 
     Also checks whether the original question/claim is contradicted by KB evidence —
@@ -634,35 +731,48 @@ def layer3_critic(
             logger.debug(f"Layer 3 — short claim ({len(claim.split())} words), proxy={proxy:.3f}: {claim[:60]}")
             continue
 
-        scores = nli.predict(pairs, apply_softmax=True)
-        # index 0=contradiction, 1=entailment, 2=neutral
-        max_entailment    = max(float(s[1]) for s in scores)
-        max_contradiction = max(float(s[0]) for s in scores)
+        scores = nli.predict(pairs, apply_softmax=False)   # raw logits
+        scores = np.array(scores, dtype=np.float64)
 
-        # Best evidence = the doc that most strongly entails this claim
-        best_idx      = max(range(len(scores)), key=lambda i: float(scores[i][1]))
-        best_evidence = evidence_cits[best_idx]["answer"] if best_idx < len(evidence_cits) else ""
+        # ── Softmax temperature scaling ──────────────────────────────────
+        # Default: standard temperature (T=1.0) → normal softmax.
+        # When semantic similarity is high but NLI is ambiguous, lower T
+        # to sharpen the distribution — amplifying the model's existing
+        # entailment signal without inventing support that isn't there.
+        temperature = 1.0
+        # Only scale temperature when NLI's top class is entailment (amplify existing signal)
+        top_class_is_entailment = False
+        if len(scores) > 0:
+            mean_logits = scores.mean(axis=0)
+            top_class_is_entailment = int(mean_logits.argmax()) == 1
 
-        # ── Semantic similarity safety net ────────────────────────────────
-        # When the LLM paraphrases a correct answer, NLI gives "neutral"
-        # (not entailment), causing a false positive.  But the retrieval
-        # cosine similarity is still high because the *meaning* is preserved.
-        #
-        # Fix: if retrieval sim >= SEM_SIM_SUPPORT_THRESH and NLI does NOT
-        # show strong contradiction, boost the entailment score to reflect
-        # the semantic match.  This only fires when NLI is ambiguous — if
-        # NLI already shows strong entailment or contradiction, it dominates.
-        sem_sim_boost = 0.0
         if (claim_sim >= config.SEM_SIM_SUPPORT_THRESH
-                and max_contradiction < 0.40
-                and max_entailment < 0.50):
-            # Linearly scale boost: sim 0.70 → 0.15 boost, sim 0.95 → 0.40 boost
-            sem_sim_boost = 0.15 + 0.25 * min(1.0, (claim_sim - config.SEM_SIM_SUPPORT_THRESH) / 0.25)
-            max_entailment = min(1.0, max_entailment + sem_sim_boost)
+                and top_class_is_entailment):
+            # Interpolate temperature: sim 0.90→T_LOW (gentle), sim 0.98→T_HIGH (aggressive)
+            t_range  = getattr(config, 'NLI_TEMP_SCALE_LOW', 0.85) - getattr(config, 'NLI_TEMP_SCALE_HIGH', 0.60)
+            sim_frac = min(1.0, (claim_sim - config.SEM_SIM_SUPPORT_THRESH) / 0.08)
+            temperature = getattr(config, 'NLI_TEMP_SCALE_LOW', 0.85) - t_range * sim_frac
             logger.debug(
-                f"Layer 3 — sem-sim boost +{sem_sim_boost:.3f} "
+                f"Layer 3 — temp-scaling T={temperature:.2f} "
                 f"(claim_sim={claim_sim:.3f}): {claim[:60]}"
             )
+
+        # Apply temperature-scaled softmax to each (evidence, claim) pair
+        scaled_probs = []
+        for logit_row in scores:
+            logit_row = logit_row / temperature
+            logit_row = logit_row - logit_row.max()          # numerical stability
+            exp_row   = np.exp(logit_row)
+            prob_row  = exp_row / exp_row.sum()
+            scaled_probs.append(prob_row)
+
+        # index 0=contradiction, 1=entailment, 2=neutral
+        max_entailment    = max(float(s[1]) for s in scaled_probs)
+        max_contradiction = max(float(s[0]) for s in scaled_probs)
+
+        # Best evidence = the doc that most strongly entails this claim
+        best_idx      = max(range(len(scaled_probs)), key=lambda i: float(scaled_probs[i][1]))
+        best_evidence = evidence_cits[best_idx]["answer"] if best_idx < len(evidence_cits) else ""
 
         # Verdict thresholds
         if max_contradiction > 0.65:
@@ -739,6 +849,11 @@ def aggregate(
     All inputs are "goodness" scores [0,1] (higher = more trustworthy).
     We invert them to get risk contributions, then apply weights.
 
+    **Confidence Gate** (new): When Layer 1 self-consistency is very high
+    (>= CONFIDENCE_GATE_THRESH), the LLM is confident in its answer.
+    In this case, clamp the NLI critic score to at least CONFIDENCE_GATE_NLI_FLOOR
+    so that a noisy NLI "neutral" can't over-rule a confident, retrieval-backed LLM.
+
     Two hard overrides push the flag directly to HIGH regardless of
     the weighted score:
       1. Both retrieval AND NLI critic fail simultaneously (fabricated content)
@@ -749,6 +864,22 @@ def aggregate(
         risk_flag  — "LOW" | "CAUTION" | "HIGH"
     """
     w = config.WEIGHTS
+
+    # ── Confidence Gate ──────────────────────────────────────────────────
+    # If the LLM is highly self-consistent AND retrieval is decent,
+    # floor the NLI score to prevent false positives from noisy NLI.
+    gate_thresh = getattr(config, 'CONFIDENCE_GATE_THRESH', 999.0)
+    gate_floor  = getattr(config, 'CONFIDENCE_GATE_NLI_FLOOR', 0.60)
+    # Only fire when consistency was actually measured (not dummy 1.0 from no-LLM eval).
+    # Genuine consistency is always < 1.0 due to sampling noise.
+    consistency_is_real = consistency < 0.999
+    if consistency_is_real and consistency >= gate_thresh and retrieval >= 0.80:
+        if critic < gate_floor:
+            logger.info(
+                f"Aggregate — Confidence gate fired: consistency={consistency:.3f} "
+                f"→ NLI floor {critic:.3f} → {gate_floor:.3f}"
+            )
+            critic = gate_floor
 
     consistency_risk = 1.0 - consistency
     retrieval_risk   = 1.0 - retrieval
