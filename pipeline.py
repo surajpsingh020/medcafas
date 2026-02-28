@@ -555,12 +555,17 @@ def layer3_critic(
     question: str = "",
 ) -> Tuple[float, List[ClaimResult]]:
     """
-    FACTSCORE-style per-claim NLI analysis with per-claim KB retrieval.
+    FACTSCORE-style per-claim NLI analysis with per-claim KB retrieval
+    and a semantic-similarity safety net.
 
     For each atomic claim decomposed from the answer:
       1. Retrieve the best-matching KB documents for *that specific claim*.
       2. Run NLI (cross-encoder) to get entailment + contradiction probabilities.
-      3. Assign a verdict: SUPPORTED / UNSUPPORTED / CONTRADICTED.
+      3. **New**: If retrieval similarity is very high (>= SEM_SIM_SUPPORT_THRESH)
+         but NLI reports neutral/unsupported, boost the score.  This handles
+         paraphrased LLM answers that are factually correct but expressed
+         differently from KB evidence — the #1 cause of false positives.
+      4. Assign a verdict: SUPPORTED / UNSUPPORTED / CONTRADICTED.
 
     Also checks whether the original question/claim is contradicted by KB evidence —
     a strong signal that the user's input is itself a false medical claim.
@@ -615,14 +620,6 @@ def layer3_critic(
             continue
 
         # ── Short-claim fallback ──────────────────────────────────────────
-        # NLI cross-encoders require a full declarative sentence as the
-        # hypothesis.  Short noun phrases (e.g. "Cholesterol embolization",
-        # "Cross-linking of DNA") produce near-zero entailment regardless of
-        # correctness — not a genuine hallucination signal.
-        # For claims below NLI_MIN_CLAIM_WORDS, substitute retrieval similarity
-        # as a proxy: high retrieval sim → plausible (score 0.50 neutral);
-        # low retrieval sim → unsupported (score 0.35).  Never mark short
-        # phrases as CONTRADICTED — NLI cannot be trusted to detect that.
         if len(claim.split()) < config.NLI_MIN_CLAIM_WORDS:
             proxy = min(0.50, max(0.35, claim_sim))
             claim_results.append(ClaimResult(
@@ -631,7 +628,7 @@ def layer3_critic(
                 entailment    = round(proxy, 4),
                 contradiction = 0.0,
                 retrieval_sim = round(claim_sim, 4),
-                verdict       = "UNSUPPORTED",  # can't confirm with noun phrase
+                verdict       = "UNSUPPORTED",
             ))
             all_scores.append(proxy)
             logger.debug(f"Layer 3 — short claim ({len(claim.split())} words), proxy={proxy:.3f}: {claim[:60]}")
@@ -645,6 +642,27 @@ def layer3_critic(
         # Best evidence = the doc that most strongly entails this claim
         best_idx      = max(range(len(scores)), key=lambda i: float(scores[i][1]))
         best_evidence = evidence_cits[best_idx]["answer"] if best_idx < len(evidence_cits) else ""
+
+        # ── Semantic similarity safety net ────────────────────────────────
+        # When the LLM paraphrases a correct answer, NLI gives "neutral"
+        # (not entailment), causing a false positive.  But the retrieval
+        # cosine similarity is still high because the *meaning* is preserved.
+        #
+        # Fix: if retrieval sim >= SEM_SIM_SUPPORT_THRESH and NLI does NOT
+        # show strong contradiction, boost the entailment score to reflect
+        # the semantic match.  This only fires when NLI is ambiguous — if
+        # NLI already shows strong entailment or contradiction, it dominates.
+        sem_sim_boost = 0.0
+        if (claim_sim >= config.SEM_SIM_SUPPORT_THRESH
+                and max_contradiction < 0.40
+                and max_entailment < 0.50):
+            # Linearly scale boost: sim 0.70 → 0.15 boost, sim 0.95 → 0.40 boost
+            sem_sim_boost = 0.15 + 0.25 * min(1.0, (claim_sim - config.SEM_SIM_SUPPORT_THRESH) / 0.25)
+            max_entailment = min(1.0, max_entailment + sem_sim_boost)
+            logger.debug(
+                f"Layer 3 — sem-sim boost +{sem_sim_boost:.3f} "
+                f"(claim_sim={claim_sim:.3f}): {claim[:60]}"
+            )
 
         # Verdict thresholds
         if max_contradiction > 0.65:

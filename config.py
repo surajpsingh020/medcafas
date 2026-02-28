@@ -41,7 +41,15 @@ MIN_SIM          = 0.40              # Below this cosine similarity → retrieva
 
 # ── NLI Critic ────────────────────────────────────────────────────────────────
 NLI_MODEL        = "cross-encoder/nli-deberta-v3-base"    # ~180MB, MNLI-acc=90.04% (was: small ~84%)
-NLI_BATCH_SIZE   = 8# Minimum claim length for NLI scoring.  Cross-encoder NLI models produce
+NLI_BATCH_SIZE   = 8
+
+# ── Semantic Similarity Safety Net ────────────────────────────────────────────
+# When retrieval cosine similarity >= this threshold but NLI gives "neutral",
+# boost the entailment score.  Handles paraphrased LLM answers that are
+# factually correct but phrased differently from KB evidence.
+SEM_SIM_SUPPORT_THRESH = 0.70   # cosine sim above which the boost activates
+
+# Minimum claim length for NLI scoring.  Cross-encoder NLI models produce
 # near-zero entailment for short noun phrases (e.g. "Cholesterol embolization")
 # which are valid medical answers but not parseable as hypotheses.  Claims
 # shorter than this threshold fall back to retrieval-similarity scoring.
@@ -59,8 +67,8 @@ WEIGHTS = {
     "entity"      : 0.15,   # Fraction of answer entities absent from retrieved evidence
 }
 
-RISK_LOW     = 0.25          # Below → 🟢 LOW  (tuned on PubMedQA 100-sample, F1=0.770)
-RISK_HIGH    = 0.35          # Above → 🔴 HIGH  (between → 🟡 CAUTION)
+RISK_LOW     = 0.20          # Below → 🟢 LOW  (tuned on PubMedQA 100-sample raw scores)
+RISK_HIGH    = 0.30          # Above → 🔴 HIGH  (between → 🟡 CAUTION)
 
 # Hard-override: if BOTH retrieval and NLI critic fail this badly, force HIGH
 # regardless of weighted score (catches fabricated / future-dateed facts)
