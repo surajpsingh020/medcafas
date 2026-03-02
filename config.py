@@ -13,7 +13,7 @@ EMBEDDING_MODEL  = "michiyasunaga/BioLinkBERT-base"  # 768-dim, biomedical domai
 # ── Knowledge Base / FAISS ────────────────────────────────────────────────────
 KB_INDEX_PATH    = "data/kb.index"
 KB_META_PATH     = "data/kb_meta.json"
-KB_MAX_DOCS      = 8000              # Multi-source expanded KB (4 sources)
+KB_MAX_DOCS      = 50000             # Expanded KB for USMLE-level verification
 
 # ── BM25 Hybrid Retrieval ─────────────────────────────────────────────────────
 BM25_INDEX_PATH  = "data/kb_bm25.pkl"  # Serialised BM25Okapi + raw passages
@@ -24,11 +24,15 @@ BM25_CANDIDATES  = 20    # FAISS fetches this many candidates; BM25 reranks to T
 ENTITY_CHECK     = True  # Verify answer entities appear in retrieved evidence
 ENTITY_MIN_TERMS = 2     # Skip check if fewer than this many key terms found
 KB_SOURCES = {
-    "medqa_usmle"        : 2000,   # GBaker/MedQA-USMLE-4-options  (clinical vignettes)
-    "pubmedqa"           : 1000,   # qiaojin/PubMedQA pqa_labeled  (clinical trial abstracts)
-    "medmcqa"           : 2000,   # medmcqa                        (medical entrance MCQs)
-    "pubmedqa_artificial": 3000,   # qiaojin/PubMedQA pqa_artificial (211k synthetic trials)
+    "medqa_usmle"        : 10000,   # GBaker/MedQA-USMLE-4-options  (full train split)
+    "pubmedqa"           : 1000,    # qiaojin/PubMedQA pqa_labeled  (clinical trial abstracts)
+    "medmcqa"            : 20000,   # medmcqa                       (medical entrance MCQs)
+    "pubmedqa_artificial": 20000,   # qiaojin/PubMedQA pqa_artificial (synthetic trials)
 }
+
+# ── Text Chunking (KB build-time) ────────────────────────────────────────
+KB_CHUNK_MAX_WORDS  = 300   # Maximum words per chunk
+KB_CHUNK_OVERLAP    = 50    # Overlap words between consecutive chunks
 
 # ── Self-Consistency ──────────────────────────────────────────────────────────
 NUM_SAMPLES      = 3                 # Re-sample LLM 3 times (balance speed vs. signal)
@@ -36,7 +40,7 @@ SAMPLE_TEMP      = 0.8               # Sampling temperature for diversity
 CONSISTENCY_RISK_THRESHOLD = 0.65   # Below this → inconsistent → risky
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
-TOP_K            = 3                 # Retrieve top-3 docs
+TOP_K            = 5                 # Retrieve top-5 docs (raised from 3 to find more substantive evidence)
 MIN_SIM          = 0.40              # Below this cosine similarity → retrieval failed
 MMR_LAMBDA       = 0.85             # Max-Marginal Relevance: 1.0 = pure relevance, 0.0 = pure diversity
 MMR_CANDIDATES   = 20               # How many FAISS candidates to consider before MMR re-ranking
@@ -44,13 +48,14 @@ MMR_CANDIDATES   = 20               # How many FAISS candidates to consider befo
 # ── NLI Critic ────────────────────────────────────────────────────────────────
 NLI_MODEL        = "cross-encoder/nli-deberta-v3-base"    # ~180MB, MNLI-acc=90.04% (was: small ~84%)
 NLI_BATCH_SIZE   = 8
+NLI_MIN_EVIDENCE_WORDS = 10         # Skip evidence < this for NLI (MedQA answers are often 1-5 words → useless as premises)
 
 # ── Semantic Similarity Safety Net (Temperature-Scaled) ──────────────────────
 # When retrieval cosine similarity >= this threshold but NLI gives "neutral",
 # apply softmax temperature scaling on NLI logits to let entailment rise.
 # Handles paraphrased LLM answers that are factually correct but phrased
 # differently from KB evidence.
-SEM_SIM_SUPPORT_THRESH = 0.90   # cosine sim above which temp-scaling activates
+SEM_SIM_SUPPORT_THRESH = 0.92   # cosine sim above which temp-scaling activates (raised for BioLinkBERT)
 NLI_TEMP_SCALE_HIGH    = 0.60   # temperature when sim >= 0.98 (aggressive squash)
 NLI_TEMP_SCALE_LOW     = 0.85   # temperature when sim ~= 0.90 (gentle squash)
 
@@ -72,11 +77,16 @@ WEIGHTS = {
     "entity"      : 0.15,   # Fraction of answer entities absent from retrieved evidence
 }
 
-# ── Confidence Gate ───────────────────────────────────────────────────────────
-# If Layer 1 consistency is very high (LLM is confident), bypass NLI critic
-# to prevent the noisy NLI from over-ruling a confident LLM.
-CONFIDENCE_GATE_THRESH = 0.92   # consistency above this → trust LLM, use retrieval-only
-CONFIDENCE_GATE_NLI_FLOOR = 0.60  # when gate fires, set NLI score to at least this
+# ── Confidence Gate (Dual-Key) ────────────────────────────────────────────────
+# The gate now requires BOTH conditions ("dual-key") before it will trust the
+# LLM and floor the NLI score.  This prevents the gate from silencing the NLI
+# critic whenever phi3.5 is merely verbose-and-consistent (the "Yes-Man" bias).
+#   Key 1: LLM self-consistency >= CONFIDENCE_GATE_THRESH
+#   Key 2: Top-1 retrieval similarity >= CONFIDENCE_GATE_RETRIEVAL_THRESH
+# If EITHER key fails, the NLI critic score is used as-is.
+CONFIDENCE_GATE_THRESH              = 0.96   # raised from 0.92 – stricter LLM bar
+CONFIDENCE_GATE_RETRIEVAL_THRESH    = 0.95   # new: retrieval must also strongly agree
+CONFIDENCE_GATE_NLI_FLOOR           = 0.60   # when gate fires, set NLI score to at least this
 
 # ── Safety Buffer (High-Conflict Detection) ──────────────────────────────────
 # When Layer 1 (LLM) and Layer 2+3 (Retrieval/NLI) strongly disagree, the

@@ -3,13 +3,15 @@ build_kb.py
 ────────────
 One-time setup script. Run this ONCE before starting the API.
 
-Builds a multi-source FAISS knowledge base from three open medical datasets:
+Builds a multi-source FAISS knowledge base from four open medical datasets
+with text chunking for fine-grained NLI verification.
 
-  1. GBaker/MedQA-USMLE-4-options  — 2 000 clinical vignette Q&A pairs
+  1. GBaker/MedQA-USMLE-4-options  — 10 000 clinical vignette Q&A pairs
   2. qiaojin/PubMedQA               — 1 000 PubMed abstract-based Q&A
-  3. medmcqa                        — 2 000 Indian medical entrance MCQs
+  3. medmcqa                        — 20 000 Indian medical entrance MCQs
+  4. qiaojin/PubMedQA pqa_artificial— 20 000 synthetic biomedical QA
 
-Total: up to 5 000 high-quality medical evidence passages.
+Total: up to 50 000+ high-quality medical evidence passages (before chunking).
 
 Usage:
     python build_kb.py
@@ -17,6 +19,7 @@ Usage:
 Output:
     data/kb.index       ← FAISS binary index
     data/kb_meta.json   ← Parallel metadata (question + ground-truth answer)
+    data/kb_bm25.pkl    ← BM25 lexical index
 """
 
 import json
@@ -35,6 +38,66 @@ from sentence_transformers import SentenceTransformer
 import config
 
 os.makedirs("data", exist_ok=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+#  Text Chunking                                                              #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+def _chunk_passage(passage: str, meta: dict,
+                   max_words: int = None,
+                   overlap: int = None) -> List[Tuple[str, dict]]:
+    """
+    Split a long passage into overlapping chunks for fine-grained retrieval.
+
+    Short passages (≤ max_words) are returned as-is.  Long passages are split
+    on sentence boundaries with `overlap` words carried forward.  Each chunk
+    preserves the original question context as a prefix so the embedding
+    captures the medical topic.
+
+    Returns list of (passage_text, meta_dict) tuples.
+    """
+    max_words = max_words or getattr(config, 'KB_CHUNK_MAX_WORDS', 300)
+    overlap   = overlap   or getattr(config, 'KB_CHUNK_OVERLAP', 50)
+
+    words = passage.split()
+    if len(words) <= max_words:
+        return [(passage, meta)]
+
+    # Extract the question prefix to prepend to every chunk
+    q_prefix = ""
+    q_text   = meta.get("question", "")
+    if q_text:
+        q_prefix = f"Question: {q_text} "
+
+    # Split into overlapping windows
+    chunks: List[Tuple[str, dict]] = []
+    start = 0
+    while start < len(words):
+        end = min(start + max_words, len(words))
+        chunk_words = words[start:end]
+        chunk_text = " ".join(chunk_words)
+
+        # Prepend question context if this is a continuation chunk
+        if start > 0 and q_prefix:
+            chunk_text = q_prefix + chunk_text
+
+        chunk_meta = dict(meta)  # shallow copy
+        chunk_meta["chunk_idx"] = len(chunks)
+
+        # Trim answer in meta to this chunk's content (for NLI)
+        # Extract answer part from chunk if possible
+        ans_start = chunk_text.find("Answer")
+        if ans_start >= 0:
+            chunk_meta["answer"] = chunk_text[ans_start:][:500]
+
+        chunks.append((chunk_text, chunk_meta))
+
+        if end >= len(words):
+            break
+        start = end - overlap
+
+    return chunks
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -206,20 +269,33 @@ def build():
         _build_seed_kb()
         return
 
-    # Respect hard cap
-    all_passages = all_passages[: config.KB_MAX_DOCS]
-    all_meta     = all_meta    [: config.KB_MAX_DOCS]
+    # ── 1b. Chunk long passages ───────────────────────────────────────────
+    print(f"\nChunking passages (max_words={config.KB_CHUNK_MAX_WORDS}, "
+          f"overlap={config.KB_CHUNK_OVERLAP})...")
+    chunked_passages: List[str] = []
+    chunked_meta:     List[dict] = []
+    for p, m in zip(all_passages, all_meta):
+        for cp, cm in _chunk_passage(p, m):
+            chunked_passages.append(cp)
+            chunked_meta.append(cm)
 
-    print(f"\nTotal passages for indexing: {len(all_passages)}")
+    print(f"  Before chunking: {len(all_passages)} passages")
+    print(f"  After chunking:  {len(chunked_passages)} chunks")
+
+    # Respect hard cap (applied after chunking)
+    chunked_passages = chunked_passages[: config.KB_MAX_DOCS]
+    chunked_meta     = chunked_meta    [: config.KB_MAX_DOCS]
+
+    print(f"  After cap ({config.KB_MAX_DOCS}): {len(chunked_passages)} chunks")
 
     # ── 2. Embed ──────────────────────────────────────────────────────────
     print(f"\nLoading embedding model: {config.EMBEDDING_MODEL}")
     embedder = SentenceTransformer(config.EMBEDDING_MODEL)
 
-    print("Embedding passages (this takes ~2-4 min on CPU)...")
+    print(f"Embedding {len(chunked_passages)} passages (batched, ~10-20 min on CPU)...")
     embeddings = embedder.encode(
-        all_passages,
-        batch_size=64,
+        chunked_passages,
+        batch_size=128,
         normalize_embeddings=True,
         show_progress_bar=True,
         convert_to_numpy=True,
@@ -233,18 +309,18 @@ def build():
 
     faiss.write_index(index, config.KB_INDEX_PATH)
     with open(config.KB_META_PATH, "w") as f:
-        json.dump(all_meta, f, indent=2)
+        json.dump(chunked_meta, f, indent=2)
 
     # ── 4. Build BM25 index ─────────────────────────────────────────────────────
     print("\nBuilding BM25 lexical index...")
-    tokenized_corpus = [p.lower().split() for p in all_passages]
+    tokenized_corpus = [p.lower().split() for p in chunked_passages]
     bm25 = BM25Okapi(tokenized_corpus)
     with open(config.BM25_INDEX_PATH, "wb") as f:
-        pickle.dump({"bm25": bm25, "passages": all_passages}, f)
+        pickle.dump({"bm25": bm25, "passages": chunked_passages}, f)
     print(f"   BM25 index saved to {config.BM25_INDEX_PATH}")
 
     # Source breakdown
-    counts = Counter(m["source"] for m in all_meta)
+    counts = Counter(m["source"] for m in chunked_meta)
     print(f"\nKnowledge base built successfully!")
     print(f"   Index  : {config.KB_INDEX_PATH}  ({index.ntotal} vectors, dim={dim})")
     print(f"   Meta   : {config.KB_META_PATH}")

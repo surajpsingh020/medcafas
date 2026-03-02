@@ -242,6 +242,117 @@ def _hybrid_scores(
     return candidates
 
 
+def _bm25_primary_retrieval(query: str, top_k: int = 5) -> Tuple[float, List[Dict]]:
+    """
+    BM25-primary retrieval for short queries (1-5 words) where embedding
+    search fails because a single term like 'Cisplatin' maps to a
+    generic region of the embedding space.
+
+    Strategy:
+      1. BM25 scores ALL 50k docs by lexical match → top N candidates.
+      2. Embed query + candidate passages → cosine similarity re-rank.
+      3. Return top-k by hybrid score.
+
+    This inverts the default FAISS-primary approach and is critical for
+    achieving answer-aware NLI: 'Cisplatin' finds cisplatin docs,
+    'Methotrexate' finds methotrexate docs.
+    """
+    index, meta = _get_kb()
+    bm25_data = _get_bm25()
+    embedder  = _get_embedder()
+
+    if not bm25_data or "bm25" not in bm25_data:
+        # Fall back to FAISS if BM25 unavailable
+        query_emb = embedder.encode(
+            [query], normalize_embeddings=True, convert_to_numpy=True
+        ).astype(np.float32)
+        distances, indices_arr = index.search(query_emb, top_k)
+        citations = []
+        sims = []
+        for dist, idx in zip(distances[0], indices_arr[0]):
+            if idx < 0 or idx >= len(meta):
+                continue
+            doc = meta[idx]
+            sims.append(float(dist))
+            citations.append({
+                "source": doc.get("source", "KB"),
+                "question": doc.get("question", ""),
+                "answer": doc.get("answer", "")[:500],
+                "similarity": round(float(dist), 4),
+            })
+        return (float(max(sims)) if sims else 0.0, citations)
+
+    # Step 1: BM25 over all docs
+    tokens = query.lower().split()
+    raw_scores = bm25_data["bm25"].get_scores(tokens)
+    # Get top 3× candidates for re-ranking
+    n_cand = min(top_k * 4, 20)
+    top_indices = np.argsort(raw_scores)[::-1][:n_cand]
+
+    # Skip docs with zero BM25 score (no lexical match)
+    top_indices = [int(i) for i in top_indices if raw_scores[i] > 0]
+    if not top_indices:
+        # No lexical matches — fall back to FAISS
+        query_emb = embedder.encode(
+            [query], normalize_embeddings=True, convert_to_numpy=True
+        ).astype(np.float32)
+        distances, indices_arr = index.search(query_emb, top_k)
+        citations = []
+        sims = []
+        for dist, idx in zip(distances[0], indices_arr[0]):
+            if idx < 0 or idx >= len(meta):
+                continue
+            doc = meta[idx]
+            sims.append(float(dist))
+            citations.append({
+                "source": doc.get("source", "KB"),
+                "question": doc.get("question", ""),
+                "answer": doc.get("answer", "")[:500],
+                "similarity": round(float(dist), 4),
+            })
+        return (float(max(sims)) if sims else 0.0, citations)
+
+    # Step 2: Compute cosine similarity for BM25 candidates
+    query_emb = embedder.encode(
+        [query], normalize_embeddings=True, convert_to_numpy=True
+    ).astype(np.float32)
+
+    # Get embedding vectors for BM25 candidates from FAISS index
+    cand_embs = np.array([index.reconstruct(i) for i in top_indices], dtype=np.float32)
+    cos_sims = cosine_similarity(query_emb, cand_embs)[0]
+
+    # Step 3: Hybrid BM25 + cosine
+    bm25_max = float(raw_scores[top_indices].max()) if len(top_indices) > 0 else 1.0
+    if bm25_max == 0:
+        bm25_max = 1.0
+
+    w = config.BM25_WEIGHT
+    candidates = []
+    for i, idx in enumerate(top_indices):
+        bm25_norm = float(raw_scores[idx]) / bm25_max
+        cosine = float(cos_sims[i])
+        hybrid = (1.0 - w) * cosine + w * bm25_norm
+        candidates.append((hybrid, idx))
+
+    candidates.sort(reverse=True)
+    candidates = candidates[:top_k]
+
+    citations = []
+    sims = []
+    for hybrid, idx in candidates:
+        doc = meta[idx]
+        sims.append(hybrid)
+        citations.append({
+            "source": doc.get("source", "KB"),
+            "question": doc.get("question", ""),
+            "answer": doc.get("answer", "")[:500],
+            "similarity": round(hybrid, 4),
+        })
+
+    retrieval_score = float(max(sims)) if sims else 0.0
+    return retrieval_score, citations
+
+
 def _mmr_rerank(
     query_emb: np.ndarray,
     candidates: List[Tuple[float, int]],
@@ -324,10 +435,16 @@ def _mmr_rerank(
     return [candidates[i] for i in selected_indices]
 
 
-def layer2_retrieval(answer: str) -> Tuple[float, List[Dict]]:
+def layer2_retrieval(answer: str, question: str = "") -> Tuple[float, List[Dict]]:
     """
     Embed the LLM answer and retrieve top-k documents from the KB using
     hybrid BM25 + cosine similarity scoring.
+
+    **Answer-Aware Retrieval**: When a question is provided, the retrieval
+    query is `question + answer` rather than just `answer`.  This ensures
+    that correct and hallucinated answers to the *same* question retrieve
+    *different* KB evidence — the correct answer pulls confirming docs while
+    the wrong answer pulls unrelated or contradicting docs.
 
     Strategy:
       1. FAISS fetches BM25_CANDIDATES (20) nearest neighbours by cosine sim.
@@ -341,14 +458,17 @@ def layer2_retrieval(answer: str) -> Tuple[float, List[Dict]]:
     index, meta = _get_kb()
     embedder    = _get_embedder()
 
+    # Answer-aware query: combine question context with answer for retrieval
+    retrieval_query = f"{question} {answer}".strip() if question else answer
+
     answer_emb = embedder.encode(
-        [answer], normalize_embeddings=True, convert_to_numpy=True
+        [retrieval_query], normalize_embeddings=True, convert_to_numpy=True
     ).astype(np.float32)
 
     n_candidates = max(config.TOP_K, getattr(config, 'MMR_CANDIDATES', config.BM25_CANDIDATES))
     distances, indices = index.search(answer_emb, n_candidates)
 
-    candidates = _hybrid_scores(answer, distances, indices, meta)
+    candidates = _hybrid_scores(retrieval_query, distances, indices, meta)
 
     # MMR re-ranking: diversify evidence so NLI sees varied perspectives
     lam = getattr(config, 'MMR_LAMBDA', 1.0)
@@ -365,7 +485,7 @@ def layer2_retrieval(answer: str) -> Tuple[float, List[Dict]]:
         citations.append({
             "source"    : doc.get("source", "KB"),
             "question"  : doc.get("question", ""),
-            "answer"    : doc.get("answer", "")[:200],
+            "answer"    : doc.get("answer", "")[:500],
             "similarity": round(hybrid, 4),
         })
 
@@ -374,23 +494,35 @@ def layer2_retrieval(answer: str) -> Tuple[float, List[Dict]]:
     return retrieval_score, citations
 
 
-def layer2_retrieval_single(query: str) -> Tuple[float, List[Dict]]:
+def layer2_retrieval_single(query: str, context: str = "") -> Tuple[float, List[Dict]]:
     """
     Retrieve top-k KB documents for a single query string using hybrid scoring
     with MMR diversity re-ranking.
     Used for per-claim retrieval in the claim decomposition loop.
+
+    For SHORT queries (< 5 words) without context: uses BM25-primary retrieval
+    to find docs by lexical match (e.g., "Cisplatin" → cisplatin docs).
+    For longer queries or when context is provided: uses FAISS-primary with
+    hybrid scoring as before.
     """
+    # Short queries: BM25-primary (lexical match for drug/term names)
+    if len(query.split()) < 5 and not context:
+        return _bm25_primary_retrieval(query, top_k=config.TOP_K)
+
     index, meta = _get_kb()
     embedder    = _get_embedder()
 
+    # Answer-aware: combine question context with claim for better evidence
+    retrieval_query = f"{context} {query}".strip() if context else query
+
     query_emb = embedder.encode(
-        [query], normalize_embeddings=True, convert_to_numpy=True
+        [retrieval_query], normalize_embeddings=True, convert_to_numpy=True
     ).astype(np.float32)
 
     n_candidates = max(config.TOP_K, getattr(config, 'MMR_CANDIDATES', config.BM25_CANDIDATES))
     distances, indices = index.search(query_emb, n_candidates)
 
-    candidates = _hybrid_scores(query, distances, indices, meta)
+    candidates = _hybrid_scores(retrieval_query, distances, indices, meta)
 
     # MMR re-ranking for per-claim retrieval too
     lam = getattr(config, 'MMR_LAMBDA', 1.0)
@@ -407,7 +539,7 @@ def layer2_retrieval_single(query: str) -> Tuple[float, List[Dict]]:
         citations.append({
             "source"    : doc.get("source", "KB"),
             "question"  : doc.get("question", ""),
-            "answer"    : doc.get("answer", "")[:200],
+            "answer"    : doc.get("answer", "")[:500],
             "similarity": round(hybrid, 4),
         })
 
@@ -688,8 +820,40 @@ def layer3_critic(
     all_scores:    List[float]       = []
 
     for claim in claims:
-        # Per-claim KB retrieval (finds the most relevant evidence for this claim)
-        claim_sim, claim_cits = layer2_retrieval_single(claim)
+        # ── Answer-aware claim construction ───────────────────────────────
+        # Short claims (< NLI_MIN_CLAIM_WORDS) can't be evaluated by NLI in
+        # isolation.  When a question is available, we construct a full
+        # verifiable hypothesis: "Question... Answer: claim"
+        # This lets NLI evaluate whether KB evidence supports/contradicts
+        # the Q+A pair rather than just the bare noun-phrase answer.
+        #
+        # RETRIEVAL strategy for short claims: use ANSWER ONLY (no question
+        # context) because the question dominates the embedding and drowns
+        # out the answer term.  "Cisplatin" retrieves cisplatin docs;
+        # "Methotrexate" retrieves methotrexate docs — different evidence.
+        # Long claims already contain sufficient context for retrieval.
+        nli_claim = claim
+        is_short_claim = len(claim.split()) < config.NLI_MIN_CLAIM_WORDS
+        if is_short_claim and question.strip():
+            # Truncate question if too long (NLI max_length=512 tokens)
+            q_words = question.split()
+            if len(q_words) > 80:
+                q_truncated = " ".join(q_words[:80])
+            else:
+                q_truncated = question
+            nli_claim = f"{q_truncated} Answer: {claim}"
+            logger.debug(
+                f"Layer 3 — short claim extended with question context: "
+                f"{claim[:40]} → {nli_claim[:80]}"
+            )
+
+        # Per-claim KB retrieval:
+        #   Short claims → answer-only retrieval (so different answers get different evidence)
+        #   Long claims  → context-aware retrieval (question provides useful context)
+        if is_short_claim:
+            claim_sim, claim_cits = layer2_retrieval_single(claim)
+        else:
+            claim_sim, claim_cits = layer2_retrieval_single(claim, context=question)
 
         # Fall back to answer-level citations if per-claim retrieval comes up empty
         evidence_cits = claim_cits if claim_cits else citations
@@ -706,22 +870,75 @@ def layer3_critic(
             all_scores.append(0.5)
             continue
 
-        # NLI: (KB evidence, claim) pairs
-        pairs = [
-            (cit["answer"], claim)
-            for cit in evidence_cits
-            if cit.get("answer")
+        # NLI: (KB evidence, claim) pairs — use nli_claim for evaluation
+        # Filter out very short evidence (e.g. MedQA 1-5 word answers) that
+        # give NLI no factual content to evaluate against.  Only evidence
+        # with >= NLI_MIN_EVIDENCE_WORDS is useful as an NLI premise.
+        min_ev_words = getattr(config, 'NLI_MIN_EVIDENCE_WORDS', 10)
+        nli_evidence = [
+            cit for cit in evidence_cits
+            if cit.get("answer") and len(cit["answer"].split()) >= min_ev_words
         ]
+        # Fall back to ALL evidence if no substantial docs available
+        if not nli_evidence:
+            nli_evidence = [cit for cit in evidence_cits if cit.get("answer")]
+
+        pairs = [(cit["answer"], nli_claim) for cit in nli_evidence]
         if not pairs:
             all_scores.append(0.5)
             continue
 
-        # ── Short-claim fallback ──────────────────────────────────────────
-        if len(claim.split()) < config.NLI_MIN_CLAIM_WORDS:
+        # ── Short-claim: Question-Evidence alignment scoring ──────────────
+        # For short claims (noun phrases like "Cisplatin"), NLI produces
+        # neutral scores regardless of correctness.  Instead, score by how
+        # well the answer-specific KB evidence aligns with the question:
+        #   - Correct answer → evidence about that topic → HIGH sim with Q
+        #   - Wrong answer → evidence about different topic → LOW sim with Q
+        # This provides discrimination even when NLI can't evaluate.
+        if is_short_claim and question.strip():
+            embedder = _get_embedder()
+            q_emb = embedder.encode(
+                [question], normalize_embeddings=True, convert_to_numpy=True
+            )
+            ev_texts = [cit["answer"] for cit in nli_evidence]
+            ev_embs = embedder.encode(
+                ev_texts, normalize_embeddings=True, convert_to_numpy=True
+            )
+            qe_sims = cosine_similarity(q_emb, ev_embs)[0]
+            best_qe_idx = int(np.argmax(qe_sims))
+            qe_score = float(qe_sims[best_qe_idx])
+            best_ev = nli_evidence[best_qe_idx]["answer"]
+
+            # Map Q-E similarity to 0-1 score:
+            # sim ~0.85+ → strong alignment (0.7-1.0)
+            # sim ~0.70  → moderate (0.5)
+            # sim ~0.50  → weak (0.3)
+            # Linear remap from [0.5, 0.9] → [0.3, 0.8]
+            net = max(0.1, min(0.9, 0.3 + (qe_score - 0.5) * (0.5 / 0.4)))
+
+            claim_results.append(ClaimResult(
+                claim         = claim,
+                best_evidence = best_ev[:500],
+                entailment    = round(qe_score, 4),
+                contradiction = 0.0,
+                retrieval_sim = round(claim_sim, 4),
+                verdict       = "SUPPORTED" if net > 0.55 else "UNSUPPORTED",
+            ))
+            all_scores.append(net)
+            logger.debug(
+                f"Layer 3 — short claim Q-E scoring: qe_sim={qe_score:.3f} "
+                f"net={net:.3f}: {claim[:60]}"
+            )
+            continue
+
+        # ── Short-claim fallback (only when no question context available) ─
+        # If claim is short AND we couldn't extend it with a question,
+        # fall back to retrieval-based proxy.
+        if is_short_claim and not question.strip():
             proxy = min(0.50, max(0.35, claim_sim))
             claim_results.append(ClaimResult(
                 claim         = claim,
-                best_evidence = evidence_cits[0]["answer"][:200] if evidence_cits else "",
+                best_evidence = nli_evidence[0]["answer"][:500] if nli_evidence else "",
                 entailment    = round(proxy, 4),
                 contradiction = 0.0,
                 retrieval_sim = round(claim_sim, 4),
@@ -748,7 +965,7 @@ def layer3_critic(
 
         if (claim_sim >= config.SEM_SIM_SUPPORT_THRESH
                 and top_class_is_entailment):
-            # Interpolate temperature: sim 0.90→T_LOW (gentle), sim 0.98→T_HIGH (aggressive)
+            # Interpolate temperature: sim 0.92→T_LOW (gentle), sim 1.0→T_HIGH (aggressive)
             t_range  = getattr(config, 'NLI_TEMP_SCALE_LOW', 0.85) - getattr(config, 'NLI_TEMP_SCALE_HIGH', 0.60)
             sim_frac = min(1.0, (claim_sim - config.SEM_SIM_SUPPORT_THRESH) / 0.08)
             temperature = getattr(config, 'NLI_TEMP_SCALE_LOW', 0.85) - t_range * sim_frac
@@ -766,29 +983,43 @@ def layer3_critic(
             prob_row  = exp_row / exp_row.sum()
             scaled_probs.append(prob_row)
 
+        # ── Three-class per-pair scoring ────────────────────────────────
         # index 0=contradiction, 1=entailment, 2=neutral
+        #
+        # Old formula: net = max_ent * (1 - max_con) collapsed neutral to ~0
+        # because max_ent is near-zero when evidence is merely irrelevant.
+        # Fix: score each (evidence, claim) pair independently using a linear
+        #   pair_net = 0.5 + 0.5*p_ent - 0.5*p_con
+        # This gives: entailed→~1.0, neutral→~0.5, contradicted→~0.0
+        # Then take the BEST pair (most favorable evidence wins).
+        pair_nets = []
+        for s in scaled_probs:
+            p_ent = float(s[1])
+            p_con = float(s[0])
+            pair_nets.append(0.5 + 0.5 * p_ent - 0.5 * p_con)
+
+        best_idx      = max(range(len(pair_nets)), key=lambda i: pair_nets[i])
+        net           = pair_nets[best_idx]
+        best_evidence = nli_evidence[best_idx]["answer"] if best_idx < len(nli_evidence) else ""
+
         max_entailment    = max(float(s[1]) for s in scaled_probs)
         max_contradiction = max(float(s[0]) for s in scaled_probs)
 
-        # Best evidence = the doc that most strongly entails this claim
-        best_idx      = max(range(len(scaled_probs)), key=lambda i: float(scaled_probs[i][1]))
-        best_evidence = evidence_cits[best_idx]["answer"] if best_idx < len(evidence_cits) else ""
-
-        # Verdict thresholds
-        if max_contradiction > 0.65:
+        # Verdict thresholds (based on best-pair probabilities)
+        best_ent = float(scaled_probs[best_idx][1])
+        best_con = float(scaled_probs[best_idx][0])
+        if best_con > 0.65:
             verdict = "CONTRADICTED"
-        elif max_entailment > 0.45:
+        elif best_ent > 0.45:
             verdict = "SUPPORTED"
         else:
             verdict = "UNSUPPORTED"
 
-        # Net score penalised by contradiction (same logic as before, now per-claim)
-        net = max_entailment * (1.0 - max_contradiction)
         all_scores.append(net)
 
         claim_results.append(ClaimResult(
             claim         = claim,
-            best_evidence = best_evidence[:200],
+            best_evidence = best_evidence[:500],
             entailment    = round(max_entailment, 4),
             contradiction = round(max_contradiction, 4),
             retrieval_sim = round(claim_sim, 4),
@@ -849,42 +1080,36 @@ def aggregate(
     All inputs are "goodness" scores [0,1] (higher = more trustworthy).
     We invert them to get risk contributions, then apply weights.
 
-    **Confidence Gate** (new): When Layer 1 self-consistency is very high
-    (>= CONFIDENCE_GATE_THRESH), the LLM is confident in its answer.
-    In this case, clamp the NLI critic score to at least CONFIDENCE_GATE_NLI_FLOOR
-    so that a noisy NLI "neutral" can't over-rule a confident, retrieval-backed LLM.
+    **Conflict-First Aggregation**: Safety Buffer is evaluated BEFORE the
+    Confidence Gate.  If the LLM and evidence layers disagree strongly,
+    the answer is forced HIGH regardless of gate eligibility.
 
-    Two hard overrides push the flag directly to HIGH regardless of
-    the weighted score:
+    **Confidence Gate (Dual-Key)**: Only fires when BOTH keys are met:
+      Key 1: consistency >= CONFIDENCE_GATE_THRESH (0.96)
+      Key 2: retrieval   >= CONFIDENCE_GATE_RETRIEVAL_THRESH (0.95)
+    If either key fails, the NLI critic score is used as-is.
+    If the Safety Buffer has already triggered, the gate is blocked.
+
+    Two additional hard overrides push the flag directly to HIGH:
       1. Both retrieval AND NLI critic fail simultaneously (fabricated content)
       2. Any claim references a future calendar year (impossible fact)
 
     Returns:
-        risk_score — [0, 1], higher = more risky
-        risk_flag  — "LOW" | "CAUTION" | "HIGH"
+        risk_score             — [0, 1], higher = more risky
+        risk_flag              — "LOW" | "CAUTION" | "HIGH"
+        safety_buffer_triggered — True if conflict-first override fired
     """
     w = config.WEIGHTS
 
-    # ── Confidence Gate ──────────────────────────────────────────────────
-    # If the LLM is highly self-consistent AND retrieval is decent,
-    # floor the NLI score to prevent false positives from noisy NLI.
-    gate_thresh = getattr(config, 'CONFIDENCE_GATE_THRESH', 999.0)
-    gate_floor  = getattr(config, 'CONFIDENCE_GATE_NLI_FLOOR', 0.60)
+    # ── Safety Buffer (High-Conflict Detection) — evaluated FIRST ────────
+    # "Conflict-First" rule: if the LLM is confident but Retrieval+NLI
+    # strongly disagree, the Safety Buffer overrides the Confidence Gate
+    # and forces HIGH-RISK.  This catches fluent but wrong answers that
+    # a "Yes-Man" LLM would otherwise whitewash via the gate.
+    safety_buffer_triggered = False
     # Only fire when consistency was actually measured (not dummy 1.0 from no-LLM eval).
     # Genuine consistency is always < 1.0 due to sampling noise.
     consistency_is_real = consistency < 0.999
-    if consistency_is_real and consistency >= gate_thresh and retrieval >= 0.80:
-        if critic < gate_floor:
-            logger.info(
-                f"Aggregate — Confidence gate fired: consistency={consistency:.3f} "
-                f"→ NLI floor {critic:.3f} → {gate_floor:.3f}"
-            )
-            critic = gate_floor
-
-    # ── Safety Buffer (High-Conflict Detection) ──────────────────────────
-    # When the LLM is confident but Retrieval+NLI strongly disagree,
-    # flag as HIGH-RISK/INCONCLUSIVE.  This catches fluent but wrong answers.
-    safety_buffer_triggered = False
     if (getattr(config, 'SAFETY_BUFFER_ENABLED', False)
             and consistency_is_real):
         evidence_support = (retrieval + critic) / 2.0
@@ -897,10 +1122,33 @@ def aggregate(
                 and evidence_support < (1.0 - min_gap)):
             safety_buffer_triggered = True
             logger.info(
-                f"Aggregate — Safety buffer triggered: "
+                f"Aggregate — Safety buffer triggered (conflict-first): "
                 f"consistency={consistency:.3f} vs evidence_support={evidence_support:.3f} "
                 f"(gap={conflict_gap:.3f} >= {conflict_thresh})"
             )
+
+    # ── Confidence Gate (Dual-Key) ───────────────────────────────────────
+    # Gate only fires when BOTH keys are satisfied:
+    #   Key 1: LLM consistency >= CONFIDENCE_GATE_THRESH  (0.96)
+    #   Key 2: Top-1 retrieval >= CONFIDENCE_GATE_RETRIEVAL_THRESH  (0.95)
+    # If the Safety Buffer has already flagged a conflict, the gate is
+    # NEVER allowed to override it ("conflict-first" principle).
+    gate_thresh     = getattr(config, 'CONFIDENCE_GATE_THRESH', 999.0)
+    gate_ret_thresh = getattr(config, 'CONFIDENCE_GATE_RETRIEVAL_THRESH', 0.95)
+    gate_floor      = getattr(config, 'CONFIDENCE_GATE_NLI_FLOOR', 0.60)
+    gate_fires = (
+        consistency_is_real
+        and not safety_buffer_triggered          # conflict-first: buffer wins
+        and consistency >= gate_thresh            # Key 1: LLM must be highly consistent
+        and retrieval   >= gate_ret_thresh        # Key 2: retrieval must strongly agree
+    )
+    if gate_fires and critic < gate_floor:
+        logger.info(
+            f"Aggregate — Confidence gate fired (dual-key): "
+            f"consistency={consistency:.3f}, retrieval={retrieval:.3f} "
+            f"→ NLI floor {critic:.3f} → {gate_floor:.3f}"
+        )
+        critic = gate_floor
 
     consistency_risk = 1.0 - consistency
     retrieval_risk   = 1.0 - retrieval
@@ -990,8 +1238,8 @@ def predict(question: str) -> PredictionResult:
     # Layer 1 — Self-Consistency
     answer, samples, consistency = layer1_consistency(question)
 
-    # Layer 2 — Whole-answer retrieval (for global citations + display)
-    retrieval_score, citations = layer2_retrieval(answer)
+    # Layer 2 — Answer-aware retrieval (question+answer for targeted evidence)
+    retrieval_score, citations = layer2_retrieval(answer, question=question)
 
     # Layer 2b — Entity overlap check (catches wrong-entity hallucinations)
     entity_risk = layer2b_entity_check(answer, citations)

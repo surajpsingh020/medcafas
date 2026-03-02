@@ -82,7 +82,7 @@ def eval_no_llm(sample: EvalSample) -> EvalResult:
     Consistency is set to 1.0 (neutral) so it doesn't skew results.
     Fast: ~1-2s per sample on CPU.
     """
-    retrieval_score, citations = layer2_retrieval(sample.answer)
+    retrieval_score, citations = layer2_retrieval(sample.answer, question=sample.question)
     entity_risk = layer2b_entity_check(sample.answer, citations)
     # layer3_critic now returns (score, claim_results) tuple
     critic_score, _ = layer3_critic(sample.answer, citations, question=sample.question)
