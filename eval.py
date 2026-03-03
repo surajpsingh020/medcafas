@@ -118,10 +118,13 @@ def eval_no_llm(sample: EvalSample) -> EvalResult:
 def eval_with_llm(sample: EvalSample) -> EvalResult:
     """
     Runs the full 3-layer pipeline via pipeline.predict().
+    Passes the sample's answer so the pipeline evaluates *that* answer
+    (not a freshly generated one) while still using Layer 1 consistency
+    to measure agreement between the provided answer and Ollama's output.
     Slower (~60-120s per sample on CPU).
     """
     from pipeline import predict
-    result = predict(sample.question)
+    result = predict(sample.question, answer=sample.answer)
 
     predicted_hallucinated = result.risk_flag == "HIGH"
     correct = predicted_hallucinated == sample.is_hallucinated

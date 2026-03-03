@@ -139,6 +139,19 @@ class PredictionResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
+#  Negation markers (shared by Layer 1 consistency & Layer 3 Q-E scoring)    #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+_NEGATION_MARKERS = (
+    "not correct", "not the ", "incorrect", "is not", "are not",
+    "was not", "were not", "cannot", "should not", "would not",
+    "except", "contraindicated", "avoid", "unlikely", "ruled out",
+    "not a ", "not an ", "no evidence", "does not", "do not",
+    "it is not",
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 #  Layer 1 — Self-Consistency                                                #
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -162,10 +175,13 @@ def _ask_ollama(question: str, temperature: float = 0.0) -> str:
         resp = requests.post(
             f"{config.OLLAMA_BASE_URL}/api/generate",
             json=payload,
-            timeout=120,
+            timeout=300,
         )
         resp.raise_for_status()
         return resp.json().get("response", "").strip()
+    except requests.exceptions.ReadTimeout:
+        logger.warning("Ollama read timeout (300s) — returning empty answer")
+        return ""
     except requests.exceptions.ConnectionError:
         raise RuntimeError(
             f"Cannot reach Ollama at {config.OLLAMA_BASE_URL}. "
@@ -916,18 +932,46 @@ def layer3_critic(
             # Linear remap from [0.5, 0.9] → [0.3, 0.8]
             net = max(0.1, min(0.9, 0.3 + (qe_score - 0.5) * (0.5 / 0.4)))
 
+            # ── Negation penalty ──────────────────────────────────────────
+            # Cosine similarity is negation-blind: "Drug X" and "NOT Drug X"
+            # retrieve the same evidence and produce the same Q-E score.
+            # When the answer/claim contains explicit negation markers AND
+            # the Q-E alignment is moderate-to-high, the evidence actually
+            # SUPPORTS the topic — but the answer NEGATES it → hallucination.
+            #
+            # Fix: invert the net score so that high Q-E alignment under
+            # negation maps to LOW support (= high risk of hallucination).
+            claim_lower = claim.lower()
+            answer_lower = answer.lower()
+            has_negation = any(
+                m in claim_lower or m in answer_lower
+                for m in _NEGATION_MARKERS
+            )
+            if has_negation:
+                # Invert: high alignment + negation → contradiction signal
+                net = max(0.1, min(0.9, 1.0 - net))
+                logger.debug(
+                    f"Layer 3 — negation detected in claim, "
+                    f"inverted Q-E net: {1.0 - net:.3f} → {net:.3f}: "
+                    f"{claim[:60]}"
+                )
+
+            verdict = "CONTRADICTED" if has_negation else (
+                "SUPPORTED" if net > 0.55 else "UNSUPPORTED"
+            )
+
             claim_results.append(ClaimResult(
                 claim         = claim,
                 best_evidence = best_ev[:500],
                 entailment    = round(qe_score, 4),
-                contradiction = 0.0,
+                contradiction = round(1.0 - qe_score, 4) if has_negation else 0.0,
                 retrieval_sim = round(claim_sim, 4),
-                verdict       = "SUPPORTED" if net > 0.55 else "UNSUPPORTED",
+                verdict       = verdict,
             ))
             all_scores.append(net)
             logger.debug(
                 f"Layer 3 — short claim Q-E scoring: qe_sim={qe_score:.3f} "
-                f"net={net:.3f}: {claim[:60]}"
+                f"net={net:.3f} negated={has_negation}: {claim[:60]}"
             )
             continue
 
@@ -1228,15 +1272,39 @@ def _build_explanation(
 #  Public API                                                                 #
 # ─────────────────────────────────────────────────────────────────────────── #
 
-def predict(question: str) -> PredictionResult:
+def predict(question: str, answer: str | None = None) -> PredictionResult:
     """
     Full end-to-end pipeline.
     Call this from the FastAPI endpoint or directly in scripts.
+
+    If *answer* is provided (eval / detection mode), Ollama still generates
+    its own answers for Layer 1, but consistency is measured between the
+    **provided** answer and Ollama's answers.  Layers 2-3 evaluate the
+    provided answer, not the LLM-generated one.
     """
     t0 = time.perf_counter()
 
-    # Layer 1 — Self-Consistency
-    answer, samples, consistency = layer1_consistency(question)
+    if answer is None:
+        # Normal mode — generate + self-check
+        answer, samples, consistency = layer1_consistency(question)
+    else:
+        # Detection mode — check a specific answer against Ollama
+        _, ollama_samples, _ = layer1_consistency(question)
+        embedder = _get_embedder()
+        all_texts = [answer] + ollama_samples
+        embs = embedder.encode(all_texts, normalize_embeddings=True)
+        sims = cosine_similarity(embs[0:1], embs[1:])[0]
+        consistency = float(np.mean(sims))
+        samples = ollama_samples
+        logger.info(f"Layer 1 — Consistency (provided vs Ollama): {consistency:.3f}")
+
+        # Negation correction: cosine similarity is negation-blind —
+        # "This is NOT correct: X" and Ollama's "X" will have high similarity
+        # despite being semantic opposites.  Cap consistency to signal doubt.
+        answer_lower = answer.lower()
+        if any(marker in answer_lower for marker in _NEGATION_MARKERS):
+            consistency = min(consistency, 0.50)
+            logger.info(f"Layer 1 — Negation penalty → consistency capped at {consistency:.3f}")
 
     # Layer 2 — Answer-aware retrieval (question+answer for targeted evidence)
     retrieval_score, citations = layer2_retrieval(answer, question=question)

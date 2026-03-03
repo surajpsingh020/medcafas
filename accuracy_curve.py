@@ -208,7 +208,7 @@ def main():
     ds_list = " + ".join(results_by_ds.keys())
     fig.suptitle(
         f"MedCAFAS Accuracy Curve\n"
-        f"{ds_list} | {mode} | deberta-v3-base NLI | 8000-doc KB",
+        f"{ds_list} | {mode} | deberta-v3-base NLI | 50k-doc KB",
         fontsize=13, fontweight="bold", y=1.01,
     )
 

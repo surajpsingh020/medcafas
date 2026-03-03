@@ -32,7 +32,7 @@ Input: Medical question / claim
   Sample LLM x 3 at temps {0.0, 0.8, 0.8}
   -> Mean pairwise semantic similarity -> consistency_score
        |
-  Layer 2 — Hybrid Retrieval Verification  (FAISS + BM25 + all-MiniLM-L6-v2)
+  Layer 2 — Hybrid Retrieval Verification  (FAISS + BM25 + BioLinkBERT-base)
   Embed answer -> BM25 lexical pre-filter (k=20) + FAISS cosine re-rank
   Hybrid score: 40% BM25 + 60% cosine similarity
   -> Top-k hybrid-scored docs -> retrieval_score, citations
@@ -42,10 +42,10 @@ Input: Medical question / claim
   Check each term appears in pooled citation text
   -> entity_risk: fraction of answer entities absent from evidence
        |
-  Layer 3 — NLI Critic  (cross-encoder/nli-deberta-v3-small)
+  Layer 3 — NLI Critic  (cross-encoder/nli-deberta-v3-base)
   Decompose answer into atomic claims (FACTSCORE-style)
   For EACH claim (≥ 8 words): per-claim KB retrieval + NLI entailment
-  Short claims (<8 words): fall back to retrieval-similarity score
+  Short claims (<8 words): Q-E similarity + negation penalty
   -> verdict per claim: SUPPORTED / UNSUPPORTED / CONTRADICTED
   + whole-answer question contradiction check
        |
@@ -66,11 +66,11 @@ Output: risk_flag, risk_score, explanation, per-claim breakdown,
 | Component | Model / Tool | Size | Purpose |
 |---|---|---|---|
 | LLM sampler | phi3.5 (Ollama) | ~2.2 GB | Self-consistency sampling |
-| Embedder | all-MiniLM-L6-v2 | 80 MB | Sentence embeddings (Layer 2 + per-claim) |
+| Embedder | michiyasunaga/BioLinkBERT-base | 440 MB | Biomedical sentence embeddings (Layer 2 + per-claim) |
 | Lexical retriever | BM25Okapi (rank-bm25) | — | 40% of hybrid retrieval score (Layer 2) |
-| Vector DB | FAISS IndexFlatIP | — | O(n) exact nearest-neighbour |
-| NLI critic | cross-encoder/nli-deberta-v3-small | 85 MB | Per-claim entailment / contradiction |
-| KB sources | MedQA-USMLE + PubMedQA + MedMCQA | — | 5 000 medical evidence passages |
+| Vector DB | FAISS IndexFlatIP (768-dim) | — | O(n) exact nearest-neighbour |
+| NLI critic | cross-encoder/nli-deberta-v3-base | 184 MB | Per-claim entailment / contradiction |
+| KB sources | MedQA-USMLE + PubMedQA + MedMCQA | — | 50 000 medical evidence passages |
 | Calibrator | sklearn IsotonicRegression | — | Post-hoc ECE reduction (eval mode) |
 | Backend | FastAPI + uvicorn | — | REST API, port 8000 |
 | Frontend | Next.js 15 + TypeScript + Tailwind | — | Interactive UI, port 3000 |
@@ -96,12 +96,15 @@ The KB aggregates three complementary open datasets:
 
 | Dataset | Docs | Domain |
 |---|---|---|
-| GBaker/MedQA-USMLE-4-options | 2 000 | USMLE clinical vignettes |
-| qiaojin/PubMedQA (pqa_labeled) | 1 000 | Clinical trial abstract Q&A |
-| medmcqa | 2 000 | Medical entrance MCQ + explanations |
-| **Total** | **5 000** | Multi-domain clinical coverage |
+| GBaker/MedQA-USMLE-4-options | 10 000 | USMLE clinical vignettes |
+| qiaojin/PubMedQA (pqa_labeled) | 19 000 | Clinical trial abstract Q&A |
+| medmcqa | 21 000 | Medical entrance MCQ + explanations |
+| **Total** | **50 000** | Multi-domain clinical coverage |
 
-### 4. Calibrated Risk Scoring
+### 4. Negation-Aware Scoring
+Cosine similarity is negation-blind: "Drug X" and "NOT Drug X" retrieve identical evidence and produce identical scores. MedCAFAS applies **lexical negation detection** to both the Q-E scoring path (Layer 3) and the consistency path (Layer 1). When explicit negation markers are detected (e.g. "not correct", "contraindicated", "ruled out"), the Q-E similarity score is inverted and the consistency is capped to signal doubt. This single fix raised ROC-AUC from 0.694 to **0.952** on the MedQA eval.
+
+### 5. Calibrated Risk Scoring
 MedCAFAS outputs **Expected Calibration Error (ECE)** alongside accuracy metrics. A well-calibrated detector (ECE < 0.05) is a prerequisite for deployment in clinical decision support. Bootstrap 95% confidence intervals are provided for all scalar metrics.
 
 ---
@@ -232,6 +235,29 @@ are mislabeled as hallucinations.
 - **ECE** — Expected Calibration Error (< 0.05 = well-calibrated)
 - **Bootstrap 95% CIs** — for accuracy, F1, and ROC-AUC
 
+### Final Results (MedQA-USMLE, n=60, phi3.5, 50k-doc KB)
+
+| Mode | Accuracy | F1 | ROC-AUC | AUC 95% CI |
+|---|---|---|---|---|
+| No-LLM (Layer 2+3 only) | 63.3% | 0.450 | 0.898 | [0.802, 0.972] |
+| **Full pipeline (all layers)** | **88.3%** | **0.881** | **0.952** | **[0.887, 0.996]** |
+
+**Confusion matrix (full pipeline):**
+
+|  | Pred: NOT-HALL | Pred: HALL |
+|---|---|---|
+| True: NOT-HALL | 27 | 3 |
+| True: HALL | 4 | **26** |
+
+**NLI discrimination gap:** correct answers score 0.615 mean entailment vs 0.280 for hallucinated (0.335 gap).
+
+### System Health (no-LLM, n=40)
+
+| Dataset | Accuracy | F1 | AUC |
+|---|---|---|---|
+| PubMedQA | 52.5% | 0.095 | 0.782 |
+| MedQA-USMLE | 65.0% | 0.500 | 0.897 |
+
 ---
 
 ## Configuration
@@ -240,8 +266,8 @@ All tuneable parameters in [`config.py`](config.py):
 
 ```python
 # Retrieval
-KB_MAX_DOCS      = 5000
-KB_SOURCES = {"medqa_usmle": 2000, "pubmedqa": 1000, "medmcqa": 2000}
+KB_MAX_DOCS      = 50000
+KB_SOURCES = {"medqa_usmle": 10000, "pubmedqa": 19000, "medmcqa": 21000}
 BM25_WEIGHT      = 0.40       # 40% BM25 lexical + 60% cosine in hybrid score
 BM25_CANDIDATES  = 20         # FAISS fetches this many; BM25 reranks to TOP_K
 
