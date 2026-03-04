@@ -206,14 +206,29 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# MedCAFAS specific
+# ─── MedCAFAS specific ────────────────────────────────────────────────
+# Large KB build artifacts (regenerable via: python build_kb.py)
 data/kb.index
 data/kb_meta.json
+data/kb_bm25.pkl
 
-# Eval result files (generated outputs, not source)
-results*.json
+# Iterative scratchpad files (should never be committed)
+test_*.py
+debug_*.py
+analyze_*.py
 
-# Next.js
+# Text dumps / logs
+project_structure.txt
+accuracy_curve_log.txt
+*_log.txt
+
+# NOTE: We intentionally DO NOT ignore:
+#   data/*.json   — final eval results needed for reproducibility
+#   data/*.tex    — LaTeX tables for the paper
+#   *.png         — final accuracy/ablation graphs
+#   ablation_results.json, baseline_results.json, error_analysis_*.json
+
+# ─── Next.js frontend ────────────────────────────────────────────────
 frontend/.next/
 frontend/out/
 frontend/node_modules/
