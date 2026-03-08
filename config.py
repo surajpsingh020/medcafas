@@ -6,6 +6,8 @@ All tuneable parameters in one place.
 # ── LLM (Ollama) ─────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL  = "http://localhost:11434"
 OLLAMA_MODEL     = "phi3.5:latest"          # ~2.2GB, fast on CPU. Alternatives: llama3.2:1b, mistral
+OLLAMA_TIMEOUT   = 300                      # Seconds to wait for a single Ollama call
+OLLAMA_MAX_QUESTION_CHARS = 3000            # Truncate input to ~750 tokens before sending to phi3.5
 
 # ── Embeddings ────────────────────────────────────────────────────────────────
 EMBEDDING_MODEL  = "michiyasunaga/BioLinkBERT-base"  # 768-dim, biomedical domain pre-trained
@@ -98,7 +100,7 @@ SAFETY_BUFFER_CONFLICT  = 0.40   # |consistency - avg(retrieval, NLI)| above thi
 SAFETY_BUFFER_MIN_GAP   = 0.30   # minimum gap between LLM confidence and evidence support
 
 RISK_LOW     = 0.20          # Below → 🟢 LOW  (tuned on PubMedQA 100-sample raw scores)
-RISK_HIGH    = 0.30          # Above → 🔴 HIGH  (between → 🟡 CAUTION)
+RISK_HIGH    = 0.21          # Above → 🔴 HIGH  (between → 🟡 CAUTION)
 
 # Hard-override: if BOTH retrieval and NLI critic fail this badly, force HIGH
 # regardless of weighted score (catches fabricated / future-dateed facts)

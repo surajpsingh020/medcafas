@@ -34,6 +34,50 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 
+class OllamaError(RuntimeError):
+    """Raised when the local Ollama LLM is unreachable or returns empty output."""
+    pass
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+#  Text-length safety for cross-encoder (DeBERTa 512-token limit)            #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+# DeBERTa tokenises roughly 1 token per 4 characters.  With a 512-token
+# budget shared across premise + hypothesis + 3 special tokens, we cap
+# each side conservatively.  This is a character-level heuristic that avoids
+# importing the DeBERTa tokeniser for a fast path.
+_NLI_MAX_PREMISE_CHARS  = 900   # ~225 tokens for evidence (premise)
+_NLI_MAX_HYPOTHESIS_CHARS = 500 # ~125 tokens for claim (hypothesis)
+# Total ≈ 350 tokens → comfortably under 512 even with long sub-words.
+
+
+def _truncate_for_nli(premise: str, hypothesis: str) -> Tuple[str, str]:
+    """
+    Truncate an NLI (premise, hypothesis) pair to fit within the
+    cross-encoder's 512-token context window.
+
+    Truncation is on character boundaries at a word break to avoid
+    splitting mid-word.  The hypothesis (claim) gets priority since
+    it's the assertion being evaluated.
+    """
+    if len(hypothesis) > _NLI_MAX_HYPOTHESIS_CHARS:
+        cut = hypothesis[:_NLI_MAX_HYPOTHESIS_CHARS].rfind(" ")
+        if cut > 0:
+            hypothesis = hypothesis[:cut]
+        else:
+            hypothesis = hypothesis[:_NLI_MAX_HYPOTHESIS_CHARS]
+
+    if len(premise) > _NLI_MAX_PREMISE_CHARS:
+        cut = premise[:_NLI_MAX_PREMISE_CHARS].rfind(" ")
+        if cut > 0:
+            premise = premise[:cut]
+        else:
+            premise = premise[:_NLI_MAX_PREMISE_CHARS]
+
+    return premise, hypothesis
+
+
 # ─────────────────────────────────────────────────────────────────────────── #
 #  Singletons (loaded once at first use)                                     #
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -159,33 +203,58 @@ def _ask_ollama(question: str, temperature: float = 0.0) -> str:
     """
     Single synchronous call to local Ollama API.
     Returns the model's answer text.
+    Raises OllamaError on timeout, connection failure, or empty response.
     """
     system_msg = (
         "You are a knowledgeable medical assistant. "
         "Provide accurate, concise answers based on established clinical guidelines. "
         "If you are not sure, say so explicitly."
     )
+
+    # ── Input truncation: cap question to ~3000 chars (~750 tokens) to stay
+    #    well within phi3.5's 4096-token context after system prompt + framing.
+    max_question_chars = getattr(config, 'OLLAMA_MAX_QUESTION_CHARS', 3000)
+    if len(question) > max_question_chars:
+        logger.warning(
+            f"Ollama — question truncated from {len(question)} to {max_question_chars} chars"
+        )
+        question = question[:max_question_chars]
+
     payload = {
         "model"  : config.OLLAMA_MODEL,
         "prompt" : f"{system_msg}\n\nQuestion: {question}\n\nAnswer:",
         "stream" : False,
         "options": {"temperature": temperature, "num_predict": 300},
     }
+    timeout = getattr(config, 'OLLAMA_TIMEOUT', 300)
     try:
         resp = requests.post(
             f"{config.OLLAMA_BASE_URL}/api/generate",
             json=payload,
-            timeout=300,
+            timeout=timeout,
         )
         resp.raise_for_status()
-        return resp.json().get("response", "").strip()
+        answer = resp.json().get("response", "").strip()
+        if not answer:
+            raise OllamaError(
+                "Ollama returned an empty response. Model may be loading or OOM."
+            )
+        return answer
     except requests.exceptions.ReadTimeout:
-        logger.warning("Ollama read timeout (300s) — returning empty answer")
-        return ""
+        raise OllamaError(
+            f"Ollama read timeout ({timeout}s). Is the model loaded? "
+            f"Try: ollama run {config.OLLAMA_MODEL}"
+        )
     except requests.exceptions.ConnectionError:
-        raise RuntimeError(
+        raise OllamaError(
             f"Cannot reach Ollama at {config.OLLAMA_BASE_URL}. "
             "Is it running?  Run: ollama serve"
+        )
+    except requests.exceptions.HTTPError as e:
+        raise OllamaError(
+            f"Ollama HTTP error: {e}. "
+            f"Model '{config.OLLAMA_MODEL}' may not be loaded. "
+            f"Try: ollama pull {config.OLLAMA_MODEL}"
         )
 
 
@@ -197,14 +266,23 @@ def layer1_consistency(question: str) -> Tuple[str, List[str], float]:
         primary_answer  — The deterministic (temp=0) answer used downstream
         samples         — All sampled answers
         consistency     — [0, 1] semantic similarity across samples
+
+    Raises:
+        OllamaError — if the primary Ollama call fails (timeout, connection, empty)
     """
     # Primary answer at temperature 0 (deterministic)
+    # This MUST succeed — let OllamaError propagate to caller
     primary = _ask_ollama(question, temperature=0.0)
 
     # Diverse samples to test consistency
+    # Sample failures are non-fatal: fall back to primary as duplicate
     samples = [primary]
     for _ in range(config.NUM_SAMPLES - 1):
-        samples.append(_ask_ollama(question, temperature=config.SAMPLE_TEMP))
+        try:
+            samples.append(_ask_ollama(question, temperature=config.SAMPLE_TEMP))
+        except OllamaError as e:
+            logger.warning(f"Layer 1 — sample call failed ({e}), using primary as fallback")
+            samples.append(primary)
 
     # Embed all samples
     embedder = _get_embedder()
@@ -899,7 +977,10 @@ def layer3_critic(
         if not nli_evidence:
             nli_evidence = [cit for cit in evidence_cits if cit.get("answer")]
 
-        pairs = [(cit["answer"], nli_claim) for cit in nli_evidence]
+        pairs = [
+            _truncate_for_nli(cit["answer"], nli_claim)
+            for cit in nli_evidence
+        ]
         if not pairs:
             all_scores.append(0.5)
             continue
@@ -1082,7 +1163,7 @@ def layer3_critic(
     claim_contradiction = 0.0
     if question and question.strip():
         q_pairs = [
-            (cit.get("answer", ""), question)
+            _truncate_for_nli(cit.get("answer", ""), question)
             for cit in citations
             if cit.get("answer", "")
         ]
@@ -1117,7 +1198,7 @@ def aggregate(
     critic: float,
     temporal_risk: float = 0.0,
     entity_risk: float = 0.0,
-) -> Tuple[float, str]:
+) -> Tuple[float, str, bool]:
     """
     Combine the three detection signals into a final risk score.
 
@@ -1272,7 +1353,7 @@ def _build_explanation(
 #  Public API                                                                 #
 # ─────────────────────────────────────────────────────────────────────────── #
 
-def predict(question: str, answer: str | None = None) -> PredictionResult:
+def predict(question: str, answer: Optional[str] = None) -> PredictionResult:
     """
     Full end-to-end pipeline.
     Call this from the FastAPI endpoint or directly in scripts.
