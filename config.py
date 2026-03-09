@@ -65,7 +65,41 @@ NLI_TEMP_SCALE_LOW     = 0.85   # temperature when sim ~= 0.90 (gentle squash)
 # near-zero entailment for short noun phrases (e.g. "Cholesterol embolization")
 # which are valid medical answers but not parseable as hypotheses.  Claims
 # shorter than this threshold fall back to retrieval-similarity scoring.
-NLI_MIN_CLAIM_WORDS = 8# ── Claim Decomposition (FACTSCORE-style per-claim verification) ──────────
+NLI_MIN_CLAIM_WORDS = 8
+
+# ── NLI Verdict Thresholds ────────────────────────────────────────────────────
+# Per-claim verdict classification in layer3_critic.
+# Applied to the best (evidence, claim) pair's softmax probabilities.
+NLI_VERDICT_CONTRADICTION_THRESH = 0.65   # p(contradiction) above this → CONTRADICTED
+NLI_VERDICT_ENTAILMENT_THRESH    = 0.45   # p(entailment) above this → SUPPORTED
+
+# ── Question-Contradiction Modulation ────────────────────────────────────────
+# When KB evidence contradicts the *question framing* (common for yes/no
+# research questions), we dampen the signal to avoid penalising correct
+# answers.  The final critic score is:
+#   critic = mean_entailment × (1 - Q_CONTRADICTION_WEIGHT × max_q_contradiction)
+Q_CONTRADICTION_WEIGHT = 0.30
+
+# ── Short-Claim Fallback Proxy Range ─────────────────────────────────────────
+# When a claim is too short for NLI and no question context is available,
+# the retrieval similarity is clamped to this range as a proxy score.
+SHORT_CLAIM_PROXY_MIN = 0.35
+SHORT_CLAIM_PROXY_MAX = 0.50
+
+# ── Q-E Score Remapping (Short Claims with Question Context) ─────────────────
+# Maps cosine-sim from [QE_REMAP_SIM_LOW, QE_REMAP_SIM_HIGH] →
+#                       [QE_REMAP_SCORE_LOW, QE_REMAP_SCORE_HIGH]
+QE_REMAP_SIM_LOW    = 0.50
+QE_REMAP_SIM_HIGH   = 0.90
+QE_REMAP_SCORE_LOW  = 0.30
+QE_REMAP_SCORE_HIGH = 0.80
+
+# ── Safety Buffer Override Delta ─────────────────────────────────────────────
+# When safety buffer or hard override fires, risk_score is forced to at least
+# RISK_HIGH + this delta to ensure the numeric score reflects the HIGH flag.
+RISK_HIGH_OVERRIDE_DELTA = 0.01
+
+# ── Claim Decomposition (FACTSCORE-style per-claim verification) ──────────
 CLAIM_MIN_WORDS  = 4        # Minimum words for a fragment to be treated as a claim
 MAX_CLAIMS       = 10       # Cap claims per answer (prevents excessive NLI calls)
 

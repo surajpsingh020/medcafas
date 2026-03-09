@@ -198,7 +198,6 @@ class ClaimResult:
     claim:         str          # The atomic claim text
     best_evidence: str          # Best supporting/contradicting KB snippet
     entailment:    float        # [0, 1]  how well KB supports this claim
-    contradiction: float        # [0, 1]  how strongly KB contradicts this claim
     retrieval_sim: float        # [0, 1]  FAISS cosine sim for this claim
     verdict:       str          # "SUPPORTED" | "UNSUPPORTED" | "CONTRADICTED"
 
@@ -211,7 +210,6 @@ class LayerResult:
     retrieval_risk:    float    # [0,1]  1 - retrieval_score
     critic_entailment: float    # [0,1]  NLI entailment prob (higher = supported)
     critic_risk:       float    # [0,1]  1 - critic_entailment
-    temporal_risk:     float    # [0,1]  1.0 if future-year claim detected
     entity_risk:       float    = 0.0   # [0,1]  fraction of key terms missing from evidence
     claim_breakdown:   List[ClaimResult] = field(default_factory=list)
     samples:           List[str] = field(default_factory=list)
@@ -237,13 +235,41 @@ class PredictionResult:
 #  Negation markers (shared by Layer 1 consistency & Layer 3 Q-E scoring)    #
 # ─────────────────────────────────────────────────────────────────────────── #
 
-_NEGATION_MARKERS = (
-    "not correct", "not the ", "incorrect", "is not", "are not",
-    "was not", "were not", "cannot", "should not", "would not",
-    "except", "contraindicated", "avoid", "unlikely", "ruled out",
-    "not a ", "not an ", "no evidence", "does not", "do not",
-    "it is not",
+# Compiled regex with word boundaries to prevent false matches like
+# "except" → "exceptional" or "unlikely" → "unlikelyhood".
+# Multi-word phrases use explicit spacing; single words use \b anchors.
+_NEGATION_RE = re.compile(
+    r"""(?ix)                       # case-insensitive, verbose
+    \b(?:
+        not\s+correct              # "not correct"
+      | not\s+the\b               # "not the ..."
+      | incorrect                  # "incorrect"
+      | is\s+not\b                # "is not"
+      | are\s+not\b               # "are not"
+      | was\s+not\b               # "was not"
+      | were\s+not\b              # "were not"
+      | cannot\b                   # "cannot"
+      | should\s+not\b            # "should not"
+      | would\s+not\b             # "would not"
+      | does\s+not\b              # "does not"
+      | do\s+not\b                # "do not"
+      | it\s+is\s+not\b           # "it is not"
+      | not\s+a\b                 # "not a ..."
+      | not\s+an\b                # "not an ..."
+      | no\s+evidence\b           # "no evidence"
+      | except\b                   # "except" but NOT "exceptional"
+      | contraindicated\b          # "contraindicated"
+      | avoid\b                    # "avoid" but NOT "avoidance"
+      | unlikely\b                 # "unlikely" but NOT "unlikelyhood"
+      | ruled\s+out\b             # "ruled out"
+    )
+    """
 )
+
+
+def _has_negation(text: str) -> bool:
+    """Check whether text contains any medical negation marker (word-boundary safe)."""
+    return bool(_NEGATION_RE.search(text))
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -1008,7 +1034,6 @@ def layer3_critic(
                 claim         = claim,
                 best_evidence = "",
                 entailment    = 0.5,
-                contradiction = 0.0,
                 retrieval_sim = 0.0,
                 verdict       = "UNSUPPORTED",
             ))
@@ -1061,8 +1086,13 @@ def layer3_critic(
             # sim ~0.85+ → strong alignment (0.7-1.0)
             # sim ~0.70  → moderate (0.5)
             # sim ~0.50  → weak (0.3)
-            # Linear remap from [0.5, 0.9] → [0.3, 0.8]
-            net = max(0.1, min(0.9, 0.3 + (qe_score - 0.5) * (0.5 / 0.4)))
+            # Linear remap from [QE_REMAP_SIM_LOW, QE_REMAP_SIM_HIGH] →
+            #                   [QE_REMAP_SCORE_LOW, QE_REMAP_SCORE_HIGH]
+            sim_range   = config.QE_REMAP_SIM_HIGH - config.QE_REMAP_SIM_LOW
+            score_range = config.QE_REMAP_SCORE_HIGH - config.QE_REMAP_SCORE_LOW
+            net = max(0.1, min(0.9,
+                config.QE_REMAP_SCORE_LOW + (qe_score - config.QE_REMAP_SIM_LOW) * (score_range / sim_range)
+            ))
 
             # ── Negation penalty ──────────────────────────────────────────
             # Cosine similarity is negation-blind: "Drug X" and "NOT Drug X"
@@ -1075,10 +1105,7 @@ def layer3_critic(
             # negation maps to LOW support (= high risk of hallucination).
             claim_lower = claim.lower()
             answer_lower = answer.lower()
-            has_negation = any(
-                m in claim_lower or m in answer_lower
-                for m in _NEGATION_MARKERS
-            )
+            has_negation = _has_negation(claim_lower) or _has_negation(answer_lower)
             if has_negation:
                 # Invert: high alignment + negation → contradiction signal
                 net = max(0.1, min(0.9, 1.0 - net))
@@ -1096,7 +1123,6 @@ def layer3_critic(
                 claim         = claim,
                 best_evidence = best_ev[:500],
                 entailment    = round(qe_score, 4),
-                contradiction = round(1.0 - qe_score, 4) if has_negation else 0.0,
                 retrieval_sim = round(claim_sim, 4),
                 verdict       = verdict,
             ))
@@ -1111,12 +1137,11 @@ def layer3_critic(
         # If claim is short AND we couldn't extend it with a question,
         # fall back to retrieval-based proxy.
         if is_short_claim and not question.strip():
-            proxy = min(0.50, max(0.35, claim_sim))
+            proxy = min(config.SHORT_CLAIM_PROXY_MAX, max(config.SHORT_CLAIM_PROXY_MIN, claim_sim))
             claim_results.append(ClaimResult(
                 claim         = claim,
                 best_evidence = nli_evidence[0]["answer"][:500] if nli_evidence else "",
                 entailment    = round(proxy, 4),
-                contradiction = 0.0,
                 retrieval_sim = round(claim_sim, 4),
                 verdict       = "UNSUPPORTED",
             ))
@@ -1184,9 +1209,9 @@ def layer3_critic(
         # Verdict thresholds (based on best-pair probabilities)
         best_ent = float(scaled_probs[best_idx][1])
         best_con = float(scaled_probs[best_idx][0])
-        if best_con > 0.65:
+        if best_con > config.NLI_VERDICT_CONTRADICTION_THRESH:
             verdict = "CONTRADICTED"
-        elif best_ent > 0.45:
+        elif best_ent > config.NLI_VERDICT_ENTAILMENT_THRESH:
             verdict = "SUPPORTED"
         else:
             verdict = "UNSUPPORTED"
@@ -1197,7 +1222,6 @@ def layer3_critic(
             claim         = claim,
             best_evidence = best_evidence[:500],
             entailment    = round(max_entailment, 4),
-            contradiction = round(max_contradiction, 4),
             retrieval_sim = round(claim_sim, 4),
             verdict       = verdict,
         ))
@@ -1231,7 +1255,7 @@ def layer3_critic(
     # A 0.3 weight preserves the signal for genuinely contradicted factual claims
     # while preventing correct answers with moderate NLI evidence from being
     # collapsed to near-zero.
-    critic_score = mean_entailment * (1.0 - 0.3 * claim_contradiction)
+    critic_score = mean_entailment * (1.0 - config.Q_CONTRADICTION_WEIGHT * claim_contradiction)
     logger.info(
         f"Layer 3 — critic_score={critic_score:.3f}  "
         f"(mean_ent={mean_entailment:.3f}  q_contradict={claim_contradiction:.3f})"
@@ -1349,14 +1373,14 @@ def aggregate(
 
     if hard_override or temporal_override:
         flag       = "HIGH"
-        risk_score = max(risk_score, config.RISK_HIGH + 0.01)  # ensure numeric score reflects HIGH
+        risk_score = max(risk_score, config.RISK_HIGH + config.RISK_HIGH_OVERRIDE_DELTA)
         if temporal_override:
             logger.info("Aggregate — Temporal override triggered (future-year claim detected)")
         if hard_override:
             logger.info("Aggregate — Hard override triggered (retrieval+critic both failed)")
     elif safety_buffer_triggered:
         flag       = "HIGH"
-        risk_score = max(risk_score, config.RISK_HIGH + 0.01)
+        risk_score = max(risk_score, config.RISK_HIGH + config.RISK_HIGH_OVERRIDE_DELTA)
         logger.info("Aggregate — Safety buffer override: LLM-evidence conflict → HIGH")
     elif risk_score < config.RISK_LOW:
         flag = "LOW"
@@ -1434,7 +1458,7 @@ def predict(question: str, answer: Optional[str] = None) -> PredictionResult:
         # "This is NOT correct: X" and Ollama's "X" will have high similarity
         # despite being semantic opposites.  Cap consistency to signal doubt.
         answer_lower = answer.lower()
-        if any(marker in answer_lower for marker in _NEGATION_MARKERS):
+        if _has_negation(answer_lower):
             consistency = min(consistency, 0.50)
             logger.info(f"Layer 1 — Negation penalty → consistency capped at {consistency:.3f}")
 
@@ -1465,7 +1489,6 @@ def predict(question: str, answer: Optional[str] = None) -> PredictionResult:
         retrieval_risk    = 1.0 - retrieval_score,
         critic_entailment = critic_entailment,
         critic_risk       = 1.0 - critic_entailment,
-        temporal_risk     = temporal_risk,
         entity_risk       = entity_risk,
         claim_breakdown   = claim_results,
         samples           = samples,
@@ -1530,7 +1553,7 @@ if __name__ == "__main__":
     if result.claim_breakdown:
         print(f"\n  Per-Claim Breakdown ({len(result.claim_breakdown)} claims):")
         for i, cr in enumerate(result.claim_breakdown, 1):
-            print(f"  [{i}] [{cr['verdict']:12}] ent={cr['entailment']:.2f}  contr={cr['contradiction']:.2f}  sim={cr['retrieval_sim']:.2f}")
+            print(f"  [{i}] [{cr['verdict']:12}] ent={cr['entailment']:.2f}  sim={cr['retrieval_sim']:.2f}")
             print(f"       Claim    : {cr['claim'][:100]}")
             print(f"       Evidence : {cr['best_evidence'][:100]}")
 
