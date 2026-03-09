@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -106,17 +107,67 @@ def _get_nli_model() -> CrossEncoder:
 
 
 def _get_kb() -> Tuple[faiss.Index, List[Dict]]:
+    """
+    Load the FAISS index and metadata JSON.
+
+    Performs an integrity check on first load:
+      - Both files must exist
+      - index.ntotal must equal len(meta)
+      - Corrupted FAISS files raise RuntimeError (not a raw C++ crash)
+
+    Raises:
+        RuntimeError — if KB is missing, corrupted, or index/meta counts diverge.
+    """
     global _faiss_index, _kb_meta
     if _faiss_index is None:
+        # ── Load FAISS index ──────────────────────────────────────────────
+        if not os.path.exists(config.KB_INDEX_PATH):
+            raise RuntimeError(
+                f"Knowledge base not found at {config.KB_INDEX_PATH}. "
+                "Please run:  python build_kb.py"
+            )
         try:
             _faiss_index = faiss.read_index(config.KB_INDEX_PATH)
+        except Exception as e:
+            raise RuntimeError(
+                f"FAISS index is corrupted or unreadable ({config.KB_INDEX_PATH}): {e}. "
+                "Delete data/kb.index and re-run:  python build_kb.py"
+            ) from e
+
+        # ── Load metadata ─────────────────────────────────────────────────
+        if not os.path.exists(config.KB_META_PATH):
+            _faiss_index = None  # reset so next call retries
+            raise RuntimeError(
+                f"KB metadata not found at {config.KB_META_PATH}. "
+                "Please run:  python build_kb.py"
+            )
+        try:
             with open(config.KB_META_PATH) as f:
                 _kb_meta = json.load(f)
-            logger.info(f"KB loaded: {_faiss_index.ntotal} docs")
-        except FileNotFoundError:
+        except (json.JSONDecodeError, Exception) as e:
+            _faiss_index = None
             raise RuntimeError(
-                "Knowledge base not found. Please run:  python build_kb.py"
+                f"KB metadata is corrupted ({config.KB_META_PATH}): {e}. "
+                "Delete data/kb_meta.json and re-run:  python build_kb.py"
+            ) from e
+
+        # ── Integrity check: vector count must match metadata count ───────
+        if _faiss_index.ntotal != len(_kb_meta):
+            n_index = _faiss_index.ntotal
+            n_meta  = len(_kb_meta)
+            # Reset singletons so the corrupted state isn't cached
+            _faiss_index = None
+            _kb_meta = None
+            raise RuntimeError(
+                f"KB integrity check failed: FAISS index has {n_index} vectors "
+                f"but kb_meta.json has {n_meta} entries. These must match. "
+                "Delete data/kb.index and data/kb_meta.json, then re-run:  python build_kb.py"
             )
+
+        logger.info(
+            f"KB loaded: {_faiss_index.ntotal} docs "
+            f"(integrity check passed: index == meta == {_faiss_index.ntotal})"
+        )
     return _faiss_index, _kb_meta
 
 

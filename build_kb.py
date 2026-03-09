@@ -307,24 +307,59 @@ def build():
     index = faiss.IndexFlatIP(dim)
     index.add(embeddings)
 
-    faiss.write_index(index, config.KB_INDEX_PATH)
-    with open(config.KB_META_PATH, "w") as f:
-        json.dump(chunked_meta, f, indent=2)
-
-    # ── 4. Build BM25 index ─────────────────────────────────────────────────────
+    # ── 4. Build BM25 index ──────────────────────────────────────────────
     print("\nBuilding BM25 lexical index...")
     tokenized_corpus = [p.lower().split() for p in chunked_passages]
     bm25 = BM25Okapi(tokenized_corpus)
-    with open(config.BM25_INDEX_PATH, "wb") as f:
-        pickle.dump({"bm25": bm25, "passages": chunked_passages}, f)
-    print(f"   BM25 index saved to {config.BM25_INDEX_PATH}")
+
+    # ── 5. Atomic save — write to .tmp files, rename only if ALL succeed ─
+    tmp_index = config.KB_INDEX_PATH + ".tmp"
+    tmp_meta  = config.KB_META_PATH  + ".tmp"
+    tmp_bm25  = config.BM25_INDEX_PATH + ".tmp"
+
+    try:
+        print("\nSaving KB artifacts (atomic write)...")
+
+        faiss.write_index(index, tmp_index)
+        print(f"  [1/3] FAISS index  \u2192 {tmp_index}")
+
+        with open(tmp_meta, "w") as f:
+            json.dump(chunked_meta, f, indent=2)
+        print(f"  [2/3] Metadata     \u2192 {tmp_meta}")
+
+        with open(tmp_bm25, "wb") as f:
+            pickle.dump({"bm25": bm25, "passages": chunked_passages}, f)
+        print(f"  [3/3] BM25 index   \u2192 {tmp_bm25}")
+
+        # All writes succeeded \u2014 atomically promote tmp \u2192 final
+        os.replace(tmp_index, config.KB_INDEX_PATH)
+        os.replace(tmp_meta,  config.KB_META_PATH)
+        os.replace(tmp_bm25,  config.BM25_INDEX_PATH)
+        print("  \u2705  All three files atomically renamed to final paths.")
+
+    except Exception as e:
+        # Clean up partial tmp files so we don't leave debris
+        for tmp in (tmp_index, tmp_meta, tmp_bm25):
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        raise RuntimeError(
+            f"KB build failed during save \u2014 no files were modified. Error: {e}"
+        ) from e
 
     # Source breakdown
     counts = Counter(m["source"] for m in chunked_meta)
     print(f"\nKnowledge base built successfully!")
     print(f"   Index  : {config.KB_INDEX_PATH}  ({index.ntotal} vectors, dim={dim})")
     print(f"   Meta   : {config.KB_META_PATH}")
+    print(f"   BM25   : {config.BM25_INDEX_PATH}")
     print(f"   Sources: {dict(counts)}")
+
+    # Integrity verification
+    if index.ntotal != len(chunked_meta):
+        print(f"\n  \u26a0\ufe0f  WARNING: index has {index.ntotal} vectors but metadata has "
+              f"{len(chunked_meta)} entries. KB may be inconsistent!")
+    else:
+        print(f"   Integrity check: {index.ntotal} vectors == {len(chunked_meta)} metadata entries \u2705")
 
 
 
@@ -407,11 +442,24 @@ def _build_seed_kb():
     index = faiss.IndexFlatIP(dim)
     index.add(embeddings)
 
-    faiss.write_index(index, config.KB_INDEX_PATH)
-    with open(config.KB_META_PATH, "w") as f:
-        json.dump(meta, f, indent=2)
+    # Atomic save — same pattern as build()
+    tmp_index = config.KB_INDEX_PATH + ".tmp"
+    tmp_meta  = config.KB_META_PATH  + ".tmp"
 
-    print(f"✅  Seed KB built ({len(seed_facts)} facts)")
+    try:
+        faiss.write_index(index, tmp_index)
+        with open(tmp_meta, "w") as f:
+            json.dump(meta, f, indent=2)
+
+        os.replace(tmp_index, config.KB_INDEX_PATH)
+        os.replace(tmp_meta,  config.KB_META_PATH)
+    except Exception as e:
+        for tmp in (tmp_index, tmp_meta):
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        raise RuntimeError(f"Seed KB save failed: {e}") from e
+
+    print(f"\u2705  Seed KB built ({len(seed_facts)} facts)")
 
 
 if __name__ == "__main__":
