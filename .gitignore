@@ -1,3 +1,10 @@
+# ── MedCAFAS-specific ignores ─────────────────────────────────────────────────
+# Large binaries rebuilt by build_kb.py
+data/kb_bm25.pkl
+# Keep generated data files untracked
+data/kb.index
+data/kb_meta.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -15,6 +22,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!frontend/lib/
 lib64/
 parts/
 sdist/

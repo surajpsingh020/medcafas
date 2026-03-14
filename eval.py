@@ -1,9 +1,9 @@
 """
 eval.py — MedCAFAS Evaluation Suite
 ─────────────────────────────────────
-Measures pipeline accuracy using HaluEval ground-truth labels.
+Measures pipeline accuracy using MedQA-USMLE ground-truth labels.
 
-Each HaluEval row has:
+Each evaluation sample has:
   question            — the medical question
   right_answer        — correct answer  → expected: LOW  (not hallucinated)
   hallucinated_answer — wrong answer    → expected: HIGH (hallucinated)
@@ -22,7 +22,7 @@ Usage:
     python eval.py               # runs 40 samples (fast, ~15 min on CPU)
     python eval.py --samples 100 # more thorough
     python eval.py --samples 0   # full dataset (slow)
-    python eval.py --no-llm      # skip Layer 1 (uses dummy answer = HaluEval answer directly, very fast)
+    python eval.py --no-llm      # skip Layer 1 (uses dataset answer directly, very fast)
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ class EvalResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-#  Fast eval (no LLM — uses HaluEval answers directly)                       #
+#  Fast eval (no LLM — uses dataset answers directly)                        #
 # ─────────────────────────────────────────────────────────────────────────── #
 
 def eval_no_llm(sample: EvalSample) -> EvalResult:

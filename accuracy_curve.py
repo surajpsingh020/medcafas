@@ -38,6 +38,7 @@ from eval import (
     load_eval_samples_pubmedqa,
     load_eval_samples_llm,
     eval_no_llm,
+    eval_with_llm,
     compute_ece,
 )
 from pipeline import _get_embedder, _get_kb, _get_nli_model, _get_bm25
@@ -107,10 +108,17 @@ def main():
         all_samples = loader(max_n)
         print(f"  Loaded {len(all_samples)} samples total.")
 
-        # Evaluate ALL samples through Layers 2+3 once
-        print(f"  Running eval_no_llm on {len(all_samples)} samples ...")
+        # Choose eval function: full pipeline for LLM dataset, Layers 2+3 for others
+        if ds_name == "LLM (phi3.5)":
+            eval_fn = eval_with_llm
+            mode_label = "eval_with_llm (full 3-layer pipeline)"
+        else:
+            eval_fn = eval_no_llm
+            mode_label = "eval_no_llm (Layers 2+3)"
+
+        print(f"  Running {mode_label} on {len(all_samples)} samples ...")
         t0 = time.time()
-        all_results = [eval_no_llm(s) for s in all_samples]
+        all_results = [eval_fn(s) for s in all_samples]
         dt = time.time() - t0
         print(f"  Eval done in {dt:.0f}s.\n")
 

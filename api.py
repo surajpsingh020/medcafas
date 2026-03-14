@@ -38,7 +38,7 @@ app.add_middleware(
 )
 
 # ── Global timeout for the pipeline (seconds) ────────────────────────────────
-PREDICT_TIMEOUT_SECONDS = 300  # 5 minutes — matches frontend's AbortSignal
+PREDICT_TIMEOUT_SECONDS = 600  # 10 minutes — CPU inference can be slow
 
 
 # ── Global exception handler — catches ANY unhandled error ────────────────────

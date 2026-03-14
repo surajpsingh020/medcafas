@@ -78,7 +78,6 @@ export default function ClaimBreakdown({ claims, temporalFlags }: Props) {
               {/* Score bars */}
               <div className="space-y-1 mb-3">
                 <ScoreBar label="Entailment" value={cr.entailment} color="bg-green-400" />
-                <ScoreBar label="Contradiction" value={cr.contradiction ?? 0} color="bg-red-400" />
                 <ScoreBar label="KB Similarity" value={cr.retrieval_sim} color="bg-blue-400" />
               </div>
 

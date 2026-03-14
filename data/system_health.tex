@@ -1,21 +1,21 @@
 \begin{table}[htbp]
 \centering
-\caption{MedCAFAS System Health — Cross-Dataset Evaluation (No-LLM (Layers 2+3))}
+\caption{MedCAFAS System Health — Cross-Dataset Evaluation (Full Pipeline)}
 \label{tab:system_health}
-\begin{tabular}{lcc}
+\begin{tabular}{lccc}
 \toprule
-\textbf{Metric} & \textbf{PubMedQA} & \textbf{MedQA} \\
+\textbf{Metric} & \textbf{PubMedQA} & \textbf{MedQA} & \textbf{LLM (phi3.5)} \\
 \midrule
-Accuracy & 0.525 & 0.650 \\
-Precision & 1.000 & 0.875 \\
-Recall (Hall.) & 0.050 & 0.350 \\
-F1 Score & 0.095 & 0.500 \\
-ROC-AUC & 0.782 & 0.897 \\
-ECE ($\downarrow$) & 0.379 & 0.319 \\
-\# Samples & 40 & 40 \\
+Accuracy & 0.817 & 0.883 & 0.417 \\
+Precision & 0.852 & 0.829 & 0.308 \\
+Recall (Hall.) & 0.767 & 0.967 & 0.600 \\
+F1 Score & 0.807 & 0.892 & 0.407 \\
+ROC-AUC & 0.924 & 0.950 & 0.379 \\
+ECE ($\downarrow$) & 0.337 & 0.321 & 0.221 \\
+\# Samples & 60 & 60 & 60 \\
 \midrule
-Accuracy 95\% CI & [0.374, 0.675] & [0.500, 0.800] \\
-F1 95\% CI & [0.000, 0.286] & [0.222, 0.703] \\
+Accuracy 95\% CI & [0.717, 0.900] & [0.800, 0.950] & [0.300, 0.550] \\
+F1 95\% CI & [0.680, 0.902] & [0.800, 0.960] & [0.246, 0.554] \\
 \bottomrule
 \end{tabular}
 \end{table}

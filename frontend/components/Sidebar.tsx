@@ -24,7 +24,7 @@ export default function Sidebar() {
             Layer 2 — Retrieval
           </p>
           <p className="mt-1 text-xs text-gray-500">
-            Embeds the answer and searches a medical knowledge base (HaluEval).
+            Embeds the answer and searches a medical knowledge base (MedMCQA).
             Low similarity = unsupported claim.
           </p>
         </div>
@@ -44,7 +44,7 @@ export default function Sidebar() {
 
       <div className="mt-6 border-t border-gray-100 pt-5 space-y-2 text-xs text-gray-400">
         <p>⚡ CPU-only · No GPU required</p>
-        <p>🏥 Built on HaluEval KB · 2 000 docs</p>
+        <p>🏥 Built on MedMCQA KB · 50,000 docs</p>
         <p>🔒 Fully local · No data leaves your machine</p>
       </div>
     </aside>
