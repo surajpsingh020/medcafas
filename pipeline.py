@@ -196,6 +196,7 @@ class ClaimResult:
     Each atomic sentence in the LLM answer is checked independently against the KB.
     """
     claim:         str          # The atomic claim text
+    retrieval_claim: str        # Contextualized claim used for retrieval
     best_evidence: str          # Best supporting/contradicting KB snippet
     entailment:    float        # [0, 1]  how well KB supports this claim
     retrieval_sim: float        # [0, 1]  FAISS cosine sim for this claim
@@ -335,6 +336,79 @@ def _ask_ollama(question: str, temperature: float = 0.0) -> str:
         )
 
 
+def contextualize_claim(question: str, claim: str) -> str:
+    """
+    Rewrite a claim into a standalone sentence using question context.
+
+    This is used immediately before per-claim embedding/FAISS retrieval so
+    pronouns and omitted subjects are resolved (e.g., "It" -> "Appendicitis").
+    Returns the original claim on any Ollama failure.
+    """
+    q = (question or "").strip()
+    c = (claim or "").strip()
+    if not q or not c:
+        return c
+
+    system_msg = (
+        "You rewrite medical claims for retrieval. "
+        "Output exactly one rewritten sentence only. "
+        "No preface, no explanation, no quotes, no markdown. "
+        "Preserve medical meaning and uncertainty wording."
+    )
+
+    prompt = (
+        "Rewrite the CLAIM so it is fully self-contained using QUESTION context.\n"
+        "Rules:\n"
+        "1) Resolve pronouns/coreference to explicit medical entities from QUESTION.\n"
+        "2) Keep the claim's meaning unchanged.\n"
+        "3) Keep it as one sentence.\n"
+        "4) Output only the rewritten sentence.\n\n"
+        "Example 1\n"
+        "QUESTION: What are the symptoms of appendicitis?\n"
+        "CLAIM: It often causes nausea and vomiting.\n"
+        "REWRITE: Appendicitis often causes nausea and vomiting.\n\n"
+        "Example 2\n"
+        "QUESTION: How is bacterial meningitis diagnosed?\n"
+        "CLAIM: It is confirmed with CSF analysis.\n"
+        "REWRITE: Bacterial meningitis is confirmed with CSF analysis.\n\n"
+        "Now rewrite this input:\n"
+        f"QUESTION: {q}\n"
+        f"CLAIM: {c}\n"
+        "REWRITE:"
+    )
+
+    payload = {
+        "model": config.OLLAMA_MODEL,
+        "prompt": f"{system_msg}\n\n{prompt}",
+        "stream": False,
+        "options": {
+            "temperature": 0.0,
+            "num_predict": 80,
+        },
+    }
+
+    timeout = min(getattr(config, "OLLAMA_TIMEOUT", 300), 30)
+
+    try:
+        resp = requests.post(
+            f"{config.OLLAMA_BASE_URL}/api/generate",
+            json=payload,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        rewritten = (resp.json().get("response", "") or "").strip()
+        if not rewritten:
+            return c
+
+        # Keep only the first sentence if model returns multiple lines/sentences.
+        one_line = " ".join(rewritten.split())
+        first_sentence = re.split(r"(?<=[.!?])\s+", one_line)[0].strip()
+        return first_sentence or c
+    except Exception as e:
+        logger.warning(f"Claim contextualization failed, using original claim: {e}")
+        return c
+
+
 def layer1_consistency(question: str) -> Tuple[str, List[str], float]:
     """
     Sample the LLM NUM_SAMPLES times and measure semantic consistency.
@@ -448,7 +522,7 @@ def _bm25_primary_retrieval(query: str, top_k: int = 5) -> Tuple[float, List[Dic
             citations.append({
                 "source": doc.get("source", "KB"),
                 "question": doc.get("question", ""),
-                "answer": doc.get("answer", "")[:500],
+                "answer": doc.get("answer", ""),
                 "similarity": round(float(dist), 4),
             })
         return (float(max(sims)) if sims else 0.0, citations)
@@ -478,7 +552,7 @@ def _bm25_primary_retrieval(query: str, top_k: int = 5) -> Tuple[float, List[Dic
             citations.append({
                 "source": doc.get("source", "KB"),
                 "question": doc.get("question", ""),
-                "answer": doc.get("answer", "")[:500],
+                "answer": doc.get("answer", ""),
                 "similarity": round(float(dist), 4),
             })
         return (float(max(sims)) if sims else 0.0, citations)
@@ -516,7 +590,7 @@ def _bm25_primary_retrieval(query: str, top_k: int = 5) -> Tuple[float, List[Dic
         citations.append({
             "source": doc.get("source", "KB"),
             "question": doc.get("question", ""),
-            "answer": doc.get("answer", "")[:500],
+            "answer": doc.get("answer", ""),
             "similarity": round(hybrid, 4),
         })
 
@@ -656,7 +730,7 @@ def layer2_retrieval(answer: str, question: str = "") -> Tuple[float, List[Dict]
         citations.append({
             "source"    : doc.get("source", "KB"),
             "question"  : doc.get("question", ""),
-            "answer"    : doc.get("answer", "")[:500],
+            "answer"    : doc.get("answer", ""),
             "similarity": round(hybrid, 4),
         })
 
@@ -710,7 +784,7 @@ def layer2_retrieval_single(query: str, context: str = "") -> Tuple[float, List[
         citations.append({
             "source"    : doc.get("source", "KB"),
             "question"  : doc.get("question", ""),
-            "answer"    : doc.get("answer", "")[:500],
+            "answer"    : doc.get("answer", ""),
             "similarity": round(hybrid, 4),
         })
 
@@ -989,49 +1063,40 @@ def layer3_critic(
 
     claim_results: List[ClaimResult] = []
     all_scores:    List[float]       = []
+    contextual_cache: Dict[Tuple[str, str], str] = {}
 
     for claim in claims:
-        # ── Answer-aware claim construction ───────────────────────────────
-        # Short claims (< NLI_MIN_CLAIM_WORDS) can't be evaluated by NLI in
-        # isolation.  When a question is available, we construct a full
-        # verifiable hypothesis: "Question... Answer: claim"
-        # This lets NLI evaluate whether KB evidence supports/contradicts
-        # the Q+A pair rather than just the bare noun-phrase answer.
-        #
-        # RETRIEVAL strategy for short claims: use ANSWER ONLY (no question
-        # context) because the question dominates the embedding and drowns
-        # out the answer term.  "Cisplatin" retrieves cisplatin docs;
-        # "Methotrexate" retrieves methotrexate docs — different evidence.
-        # Long claims already contain sufficient context for retrieval.
-        nli_claim = claim
-        is_short_claim = len(claim.split()) < config.NLI_MIN_CLAIM_WORDS
-        if is_short_claim and question.strip():
-            # Truncate question if too long (NLI max_length=512 tokens)
-            q_words = question.split()
-            if len(q_words) > 80:
-                q_truncated = " ".join(q_words[:80])
-            else:
-                q_truncated = question
-            nli_claim = f"{q_truncated} Answer: {claim}"
-            logger.debug(
-                f"Layer 3 — short claim extended with question context: "
-                f"{claim[:40]} → {nli_claim[:80]}"
-            )
+        # ── 1. Contextualize the claim using Llama 3.1 ──
+        retrieval_claim = claim
+        if question.strip():
+            cache_key = (question, claim)
+            if cache_key not in contextual_cache:
+                contextual_cache[cache_key] = contextualize_claim(question, claim)
+            retrieval_claim = contextual_cache[cache_key]
 
-        # Per-claim KB retrieval:
-        #   Short claims → answer-only retrieval (so different answers get different evidence)
-        #   Long claims  → context-aware retrieval (question provides useful context)
-        if is_short_claim:
-            claim_sim, claim_cits = layer2_retrieval_single(claim)
-        else:
-            claim_sim, claim_cits = layer2_retrieval_single(claim, context=question)
+        # ── 2. The Amnesia Fix: Give the rewritten claim to DeBERTa ──
+        nli_claim = retrieval_claim
+        is_short_claim = len(nli_claim.split()) < config.NLI_MIN_CLAIM_WORDS
+        if is_short_claim and question.strip():
+            q_truncated = " ".join(question.split()[:80])
+            nli_claim = f"{q_truncated} Answer: {nli_claim}"
+
+        # ── 3. The FAISS Magnet Fix: Retrieve using ONLY the clean claim ──
+        claim_sim, claim_cits = layer2_retrieval_single(retrieval_claim)
 
         # Fall back to answer-level citations if per-claim retrieval comes up empty
         evidence_cits = claim_cits if claim_cits else citations
 
+        # ── 4. The "MCQ Blindspot" Fix ──
+        # Merge the clinical vignette (question) with the factual option (answer)
+        # so DeBERTa gets the full medical context, not just a single word like "T10".
+        for cit in evidence_cits:
+            cit["answer"] = f"Context: {cit.get('question', '')} Fact: {cit.get('answer', '')}".strip()
+
         if not evidence_cits:
             claim_results.append(ClaimResult(
                 claim         = claim,
+                retrieval_claim = retrieval_claim,
                 best_evidence = "",
                 entailment    = 0.5,
                 retrieval_sim = 0.0,
@@ -1121,7 +1186,8 @@ def layer3_critic(
 
             claim_results.append(ClaimResult(
                 claim         = claim,
-                best_evidence = best_ev[:500],
+                retrieval_claim = retrieval_claim,
+                best_evidence = best_ev,
                 entailment    = round(qe_score, 4),
                 retrieval_sim = round(claim_sim, 4),
                 verdict       = verdict,
@@ -1140,7 +1206,8 @@ def layer3_critic(
             proxy = min(config.SHORT_CLAIM_PROXY_MAX, max(config.SHORT_CLAIM_PROXY_MIN, claim_sim))
             claim_results.append(ClaimResult(
                 claim         = claim,
-                best_evidence = nli_evidence[0]["answer"][:500] if nli_evidence else "",
+                retrieval_claim = retrieval_claim,
+                best_evidence = nli_evidence[0]["answer"] if nli_evidence else "",
                 entailment    = round(proxy, 4),
                 retrieval_sim = round(claim_sim, 4),
                 verdict       = "UNSUPPORTED",
@@ -1220,7 +1287,8 @@ def layer3_critic(
 
         claim_results.append(ClaimResult(
             claim         = claim,
-            best_evidence = best_evidence[:500],
+            retrieval_claim = retrieval_claim,
+            best_evidence = best_evidence,
             entailment    = round(max_entailment, 4),
             retrieval_sim = round(claim_sim, 4),
             verdict       = verdict,

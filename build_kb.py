@@ -238,6 +238,38 @@ def _load_medmcqa(max_docs: int) -> Tuple[List[str], List[dict]]:
     print(f"         Loaded {len(passages)} passages")
     return passages, meta
 
+def _load_medquad(max_docs: int) -> Tuple[List[str], List[dict]]:
+    """
+    keivalya/MedQuad-MedicalQnADataset
+    Contains QA pairs from NIH websites. Perfect for basic definitions and symptoms.
+    """
+    print(f"  [5/5] MedQuad (NIH Encyclopedic)  (target: {max_docs} docs)...")
+    try:
+        ds = load_dataset("keivalya/MedQuad-MedicalQnADataset", split="train")
+    except Exception as e:
+        print(f"        FAILED: {e}")
+        return [], []
+
+    passages, meta = [], []
+    for row in ds:
+        if len(passages) >= max_docs:
+            break
+        q = (row.get("Question") or "").strip()
+        ans = (row.get("Answer") or "").strip()
+        if not q or not ans:
+            continue
+            
+        text = f"Topic: {q} Definition: {ans}"
+        passages.append(text)
+        meta.append({
+            "question": q,
+            "answer": ans[:500],
+            "source": "MedQuad-NIH",
+        })
+
+    print(f"        Loaded {len(passages)} passages")
+    return passages, meta
+
 
 # ─────────────────────────────────────────────────────────────────────────── #
 #  Main builder                                                               #
@@ -256,6 +288,7 @@ def build():
         (_load_pubmedqa,            "pubmedqa"),
         (_load_medmcqa,             "medmcqa"),
         (_load_pubmedqa_artificial, "pubmedqa_artificial"),
+        (_load_medquad,             "medquad"),
     ]:
         max_n = config.KB_SOURCES.get(key, 0)
         if max_n <= 0:

@@ -5,9 +5,9 @@ All tuneable parameters in one place.
 
 # ── LLM (Ollama) ─────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL  = "http://localhost:11434"
-OLLAMA_MODEL     = "phi3.5:latest"          # ~2.2GB, fast on CPU. Alternatives: llama3.2:1b, mistral
+OLLAMA_MODEL     = "llama3.1"         
 OLLAMA_TIMEOUT   = 600                      # Seconds to wait for a single Ollama call
-OLLAMA_MAX_QUESTION_CHARS = 3000            # Truncate input to ~750 tokens before sending to phi3.5
+OLLAMA_MAX_QUESTION_CHARS = 3000            
 
 # ── Embeddings ────────────────────────────────────────────────────────────────
 EMBEDDING_MODEL  = "michiyasunaga/BioLinkBERT-base"  # 768-dim, biomedical domain pre-trained
@@ -15,7 +15,7 @@ EMBEDDING_MODEL  = "michiyasunaga/BioLinkBERT-base"  # 768-dim, biomedical domai
 # ── Knowledge Base / FAISS ────────────────────────────────────────────────────
 KB_INDEX_PATH    = "data/kb.index"
 KB_META_PATH     = "data/kb_meta.json"
-KB_MAX_DOCS      = 50000             # Expanded KB for USMLE-level verification
+KB_MAX_DOCS      = 65000             # Increased from 50k to fit the new NIH data
 
 # ── BM25 Hybrid Retrieval ─────────────────────────────────────────────────────
 BM25_INDEX_PATH  = "data/kb_bm25.pkl"  # Serialised BM25Okapi + raw passages
@@ -30,6 +30,7 @@ KB_SOURCES = {
     "pubmedqa"           : 1000,    # qiaojin/PubMedQA pqa_labeled  (clinical trial abstracts)
     "medmcqa"            : 20000,   # medmcqa                       (medical entrance MCQs)
     "pubmedqa_artificial": 20000,   # qiaojin/PubMedQA pqa_artificial (synthetic trials)
+    "medquad"            : 15000,   # <--- NEW: NIH Encyclopedic Definitions
 }
 
 # ── Text Chunking (KB build-time) ────────────────────────────────────────
@@ -48,7 +49,7 @@ MMR_LAMBDA       = 0.85             # Max-Marginal Relevance: 1.0 = pure relevan
 MMR_CANDIDATES   = 20               # How many FAISS candidates to consider before MMR re-ranking
 
 # ── NLI Critic ────────────────────────────────────────────────────────────────
-NLI_MODEL        = "cross-encoder/nli-deberta-v3-base"    # ~180MB, MNLI-acc=90.04% (was: small ~84%)
+NLI_MODEL        = "cross-encoder/nli-deberta-v3-large"    
 NLI_BATCH_SIZE   = 8
 NLI_MIN_EVIDENCE_WORDS = 10         # Skip evidence < this for NLI (MedQA answers are often 1-5 words → useless as premises)
 
@@ -107,10 +108,10 @@ MAX_CLAIMS       = 10       # Cap claims per answer (prevents excessive NLI call
 TEMPORAL_DETECTION = True   # Flag claims that reference future calendar years
 # ── Score Aggregation ─────────────────────────────────────────────────────────
 WEIGHTS = {
-    "consistency" : 0.25,   # How much answers vary across samples
-    "retrieval"   : 0.30,   # How well claims are backed by evidence (BM25 + cosine)
-    "critic"      : 0.30,   # NLI entailment score (claim vs. evidence)
-    "entity"      : 0.15,   # Fraction of answer entities absent from retrieved evidence
+    "consistency" : 0.15,
+    "retrieval"   : 0.20,
+    "critic"      : 0.55,
+    "entity"      : 0.10,
 }
 
 # ── Confidence Gate (Dual-Key) ────────────────────────────────────────────────
@@ -133,8 +134,8 @@ SAFETY_BUFFER_ENABLED   = True
 SAFETY_BUFFER_CONFLICT  = 0.40   # |consistency - avg(retrieval, NLI)| above this → conflict
 SAFETY_BUFFER_MIN_GAP   = 0.30   # minimum gap between LLM confidence and evidence support
 
-RISK_LOW     = 0.20          # Below → 🟢 LOW  (tuned on PubMedQA 100-sample raw scores)
-RISK_HIGH    = 0.30          # Above → 🔴 HIGH  (between → 🟡 CAUTION)
+RISK_LOW     = 0.20          # Keep this low so only perfectly clean answers get green 'LOW' flags
+RISK_HIGH    = 0.32          # The new Goldilocks threshold!
 
 # Hard-override: if BOTH retrieval and NLI critic fail this badly, force HIGH
 # regardless of weighted score (catches fabricated / future-dateed facts)
