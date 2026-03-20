@@ -227,11 +227,19 @@ def main():
     print("Models ready.\n")
 
     datasets: Dict[str, List[EvalSample]] = {}
-    if args.dataset in ("pubmedqa", "all"):
-        datasets["PubMedQA"] = load_eval_samples_pubmedqa(args.samples)
-    if args.dataset in ("medqa", "all"):
-        datasets["MedQA-USMLE"] = load_eval_samples(args.samples)
-
+    print("Loading real LLM answers from data/eval_llm_final.json...")
+    with open("data/eval_llm_final.json", "r") as f:
+        llm_data = json.load(f)
+    
+    llm_samples = []
+    for r in llm_data:
+        llm_samples.append(EvalSample(
+            question=r["question"],
+            answer=r["answer"],
+            is_hallucinated=r["is_hallucinated"]
+        ))
+    datasets["Llama 3.1 (PubMedQA)"] = llm_samples
+    
     all_results: Dict[str, List[BaselineRow]] = {}
 
     for ds_name, samples in datasets.items():

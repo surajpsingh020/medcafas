@@ -56,10 +56,6 @@ from pipeline import (
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
 
-# -------------------------------------------------------------------------- #
-#  Ablation eval functions                                                    #
-# -------------------------------------------------------------------------- #
-
 def _eval_full(sample: EvalSample) -> EvalResult:
     """Full pipeline (all layers active)."""
     return eval_no_llm(sample)
@@ -131,7 +127,7 @@ def _eval_nli_only(sample: EvalSample) -> EvalResult:
 def _eval_no_semsim(sample: EvalSample) -> EvalResult:
     """Disable the semantic similarity safety net (revert to pure NLI)."""
     original_thresh = config.SEM_SIM_SUPPORT_THRESH
-    config.SEM_SIM_SUPPORT_THRESH = 999.0  # effectively disables boost
+    config.SEM_SIM_SUPPORT_THRESH = 999.0 
     try:
         result = eval_no_llm(sample)
     finally:
@@ -139,9 +135,6 @@ def _eval_no_semsim(sample: EvalSample) -> EvalResult:
     return result
 
 
-# -------------------------------------------------------------------------- #
-#  Scoring                                                                    #
-# -------------------------------------------------------------------------- #
 
 @dataclass
 class AblationRow:
@@ -167,9 +160,6 @@ def _score(name: str, results: List[EvalResult]) -> AblationRow:
     return AblationRow(name=name, accuracy=acc, f1=f1, roc_auc=auc, ece=ece, n=len(results))
 
 
-# -------------------------------------------------------------------------- #
-#  Main                                                                       #
-# -------------------------------------------------------------------------- #
 
 def main():
     parser = argparse.ArgumentParser(description="MedCAFAS Ablation Study")
@@ -184,14 +174,20 @@ def main():
     _get_embedder(); _get_kb(); _get_nli_model(); _get_bm25()
     print("Models ready.\n")
 
-    # Load datasets
     datasets: Dict[str, List[EvalSample]] = {}
-    if args.dataset in ("pubmedqa", "all"):
-        datasets["PubMedQA"] = load_eval_samples_pubmedqa(args.samples)
-    if args.dataset in ("medqa", "all"):
-        datasets["MedQA-USMLE"] = load_eval_samples(args.samples)
+    print("Loading real LLM answers from data/eval_llm_final.json...")
+    with open("data/eval_llm_final.json", "r") as f:
+        llm_data = json.load(f)
+    
+    llm_samples = []
+    for r in llm_data:
+        llm_samples.append(EvalSample(
+            question=r["question"],
+            answer=r["answer"],
+            is_hallucinated=r["is_hallucinated"]
+        ))
+    datasets["Llama 3.1 (PubMedQA)"] = llm_samples
 
-    # Ablation configurations
     ablations: List[Tuple[str, Callable]] = [
         ("Full pipeline",        _eval_full),
         ("- BM25 (cosine only)", _eval_no_bm25),
@@ -201,8 +197,7 @@ def main():
         ("- Sem-sim boost",      _eval_no_semsim),
     ]
 
-    all_rows: Dict[str, List[AblationRow]] = {}  # ds_name -> rows
-
+    all_rows: Dict[str, List[AblationRow]] = {}  
     for ds_name, samples in datasets.items():
         print(f"\n{'='*65}")
         print(f"  Dataset: {ds_name} ({len(samples)} samples)")
@@ -221,7 +216,6 @@ def main():
 
         all_rows[ds_name] = rows
 
-    # -- Print summary tables -----------------------------------------------
     print("\n\n" + "=" * 75)
     print("  ABLATION STUDY RESULTS")
     print("=" * 75)
@@ -233,14 +227,12 @@ def main():
         for r in rows:
             print(f"  {r.name:<24} {r.accuracy:>8.1%} {r.f1:>7.3f} {r.roc_auc:>8.3f} {r.ece:>7.3f}")
 
-        # Delta from full pipeline
         full = rows[0]
         print(f"\n  Delta from full pipeline (accuracy):")
         for r in rows[1:]:
             delta = r.accuracy - full.accuracy
             print(f"  {r.name:<24} {delta:>+7.1%}")
 
-    # -- LaTeX table --------------------------------------------------------
     print("\n\n  LaTeX Table (copy-paste into paper):")
     print("  \\begin{table}[h]")
     print("  \\centering")
@@ -261,7 +253,6 @@ def main():
     print("  \\end{tabular}")
     print("  \\end{table}")
 
-    # -- Bar chart ----------------------------------------------------------
     fig, axes = plt.subplots(1, len(all_rows), figsize=(8 * len(all_rows), 6),
                              squeeze=False)
 
@@ -285,7 +276,6 @@ def main():
         ax.legend(fontsize=10)
         ax.grid(axis="y", alpha=0.3)
 
-        # Annotate
         for bar in bars1:
             ax.annotate(f"{bar.get_height():.0%}",
                         xy=(bar.get_x() + bar.get_width()/2, bar.get_height()),
@@ -298,7 +288,6 @@ def main():
     print(f"\n  [OK] Ablation chart saved to {out}")
     plt.close()
 
-    # -- Save JSON ----------------------------------------------------------
     out_json = "ablation_results.json"
     export = {}
     for ds_name, rows in all_rows.items():

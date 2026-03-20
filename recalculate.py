@@ -5,7 +5,6 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classifi
 with open("data/eval_llm_final.json", "r") as f:
     data = json.load(f)
 
-# The new weights we tested
 OLD_W = {"consistency": 0.25, "retrieval": 0.30, "critic": 0.30, "entity": 0.15}
 NEW_W = {"consistency": 0.15, "retrieval": 0.20, "critic": 0.55, "entity": 0.10}
 
@@ -33,7 +32,6 @@ for thresh in np.arange(0.30, 0.60, 0.01):
     y_true = [int(r['is_hallucinated']) for r in data]
     y_pred = [int(r['new_risk'] >= thresh) for r in data]
     
-    # We optimize for Macro F1 to balance both classes equally
     f1 = f1_score(y_true, y_pred, average='macro', zero_division=0)
     if f1 > best_f1:
         best_f1 = f1

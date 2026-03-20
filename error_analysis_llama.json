@@ -1,0 +1,382 @@
+{
+  "dataset": "Llama 3.1 (PubMedQA)",
+  "accuracy": 0.54,
+  "n_errors": 46,
+  "n_fp": 37,
+  "n_fn": 9,
+  "category_counts": {
+    "FP-Entity": 36,
+    "FP-Combo": 1,
+    "FN-Ret": 9
+  },
+  "errors": [
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 60% terms as missing. Too aggressive.",
+      "question": "Do patterns of knowledge and attitudes exist among unvaccinated seniors?",
+      "risk_score": 0.35938700000000007
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Combo",
+      "domain": "Nephrology",
+      "reason": "Multiple signals compounded: ret=0.97, nli=0.50, ent=0.00.",
+      "question": "Is there a model to teach and practice retroperitoneoscopic nephrectomy?",
+      "risk_score": 0.356847
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 60% terms as missing. Too aggressive.",
+      "question": "Secondhand smoke risk in infants discharged from an NICU: potential for significant health dispariti",
+      "risk_score": 0.376906
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Pharmacology",
+      "reason": "Entity check flagged 75% terms as missing. Too aggressive.",
+      "question": "Does pretreatment with statins improve clinical outcome after stroke?",
+      "risk_score": 0.38041
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 93% terms as missing. Too aggressive.",
+      "question": "Is Chaalia/Pan Masala harmful for health?",
+      "risk_score": 0.37566700000000003
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Pathology",
+      "reason": "Entity check flagged 60% terms as missing. Too aggressive.",
+      "question": "Is there a favorable subset of patients with prostate cancer who develop oligometastases?",
+      "risk_score": 0.41314500000000004
+    },
+    {
+      "error_type": "FN",
+      "category": "FN-Ret",
+      "domain": "Other",
+      "reason": "High retrieval score (0.96) for hallucinated answer. Superficial match.",
+      "question": "Transient tachypnea of the newborn (TTN): a role for polymorphisms in the beta-adrenergic receptor (",
+      "risk_score": 0.27029400000000003
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 75% terms as missing. Too aggressive.",
+      "question": "Convulsions and retinal haemorrhage: should we look further?",
+      "risk_score": 0.3385250000000001
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Pathology",
+      "reason": "Entity check flagged 90% terms as missing. Too aggressive.",
+      "question": "Quality of life in lung cancer patients: does socioeconomic status matter?",
+      "risk_score": 0.42929700000000004
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 56% terms as missing. Too aggressive.",
+      "question": "Chronic functional somatic symptoms: a single syndrome?",
+      "risk_score": 0.44508
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Pharmacology",
+      "reason": "Entity check flagged 86% terms as missing. Too aggressive.",
+      "question": "Do patients with localized prostate cancer treatment really want more aggressive treatment?",
+      "risk_score": 0.35249
+    },
+    {
+      "error_type": "FN",
+      "category": "FN-Ret",
+      "domain": "Other",
+      "reason": "High retrieval score (0.96) for hallucinated answer. Superficial match.",
+      "question": "Is vitamin D deficiency a feature of pediatric celiac disease?",
+      "risk_score": 0.30889800000000006
+    },
+    {
+      "error_type": "FN",
+      "category": "FN-Ret",
+      "domain": "Other",
+      "reason": "High retrieval score (0.97) for hallucinated answer. Superficial match.",
+      "question": "Spinal subdural hematoma: a sequela of a ruptured intracranial aneurysm?",
+      "risk_score": 0.304589
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 100% terms as missing. Too aggressive.",
+      "question": "Does nuchal translucency thickness in the first trimester predict GDM onset during pregnancy?",
+      "risk_score": 0.36877400000000005
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 67% terms as missing. Too aggressive.",
+      "question": "Cold knife conization vs. LEEP. Are they the same procedure?",
+      "risk_score": 0.39875200000000005
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 88% terms as missing. Too aggressive.",
+      "question": "Can communication with terminally ill patients be taught?",
+      "risk_score": 0.4012110000000001
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 55% terms as missing. Too aggressive.",
+      "question": "Do approved doctors and medical referees in the UK agree when assessing a seafarer's fitness?",
+      "risk_score": 0.39789300000000005
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 50% terms as missing. Too aggressive.",
+      "question": "Can mental imagery functional magnetic resonance imaging predict recovery in patients with disorders",
+      "risk_score": 0.381122
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 100% terms as missing. Too aggressive.",
+      "question": "The nurse cystoscopist: a feasible option?",
+      "risk_score": 0.42808
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 60% terms as missing. Too aggressive.",
+      "question": "Should ascitis volume and anthropometric measurements be estimated in hospitalized alcoholic cirroti",
+      "risk_score": 0.44659400000000005
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 62% terms as missing. Too aggressive.",
+      "question": "Are wandering and physically nonaggressive agitation equivalent?",
+      "risk_score": 0.378546
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 75% terms as missing. Too aggressive.",
+      "question": "Volume change of uterine myomas during pregnancy: do myomas really grow?",
+      "risk_score": 0.35616000000000003
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 60% terms as missing. Too aggressive.",
+      "question": "Profiling quality of care: Is there a role for peer review?",
+      "risk_score": 0.417518
+    },
+    {
+      "error_type": "FN",
+      "category": "FN-Ret",
+      "domain": "Other",
+      "reason": "High retrieval score (0.91) for hallucinated answer. Superficial match.",
+      "question": "Does stress increase imitation of drinking behavior?",
+      "risk_score": 0.271154
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Pathology",
+      "reason": "Entity check flagged 80% terms as missing. Too aggressive.",
+      "question": "Does pain intensity predict a poor opioid response in cancer patients?",
+      "risk_score": 0.38714100000000007
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 54% terms as missing. Too aggressive.",
+      "question": "Kell alloimmunization in pregnancy: associated with fetal thrombocytopenia?",
+      "risk_score": 0.43017
+    },
+    {
+      "error_type": "FN",
+      "category": "FN-Ret",
+      "domain": "Other",
+      "reason": "High retrieval score (0.89) for hallucinated answer. Superficial match.",
+      "question": "Can surgeon familiarization with current evidence lead to a change in practice?",
+      "risk_score": 0.30130900000000005
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Pharmacology",
+      "reason": "Entity check flagged 100% terms as missing. Too aggressive.",
+      "question": "Does invasive diagnosis of nosocomial pneumonia during off-hours delay treatment?",
+      "risk_score": 0.40577699999999994
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Cardiology",
+      "reason": "Entity check flagged 71% terms as missing. Too aggressive.",
+      "question": "Do lipids, blood pressure, diabetes, and smoking confer equal risk of myocardial infarction in women",
+      "risk_score": 0.32692499999999997
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Surgery",
+      "reason": "Entity check flagged 100% terms as missing. Too aggressive.",
+      "question": "Appendectomy timing: Will delayed surgery increase the complications?",
+      "risk_score": 0.460769
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Pharmacology",
+      "reason": "Entity check flagged 86% terms as missing. Too aggressive.",
+      "question": "Is the advanced age a contraindication to GERD laparoscopic surgery?",
+      "risk_score": 0.40690200000000004
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Psychiatry",
+      "reason": "Entity check flagged 79% terms as missing. Too aggressive.",
+      "question": "Ultra high risk (UHR) for psychosis criteria: are there different levels of risk for transition to p",
+      "risk_score": 0.35567499999999996
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 60% terms as missing. Too aggressive.",
+      "question": "Production of chemokines by perivascular adipose tissue: a role in the pathogenesis of atheroscleros",
+      "risk_score": 0.340525
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 86% terms as missing. Too aggressive.",
+      "question": "Are environmental factors important in primary systemic vasculitis?",
+      "risk_score": 0.4873590000000001
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Gastroenterology",
+      "reason": "Entity check flagged 77% terms as missing. Too aggressive.",
+      "question": "Can we ease the financial burden of colonoscopy?",
+      "risk_score": 0.43805000000000005
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Pharmacology",
+      "reason": "Entity check flagged 100% terms as missing. Too aggressive.",
+      "question": "Do antibiotics decrease post-tonsillectomy morbidity?",
+      "risk_score": 0.467437
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 57% terms as missing. Too aggressive.",
+      "question": "Does Paget's disease exist in India?",
+      "risk_score": 0.5107180000000001
+    },
+    {
+      "error_type": "FN",
+      "category": "FN-Ret",
+      "domain": "Endocrinology",
+      "reason": "High retrieval score (0.85) for hallucinated answer. Superficial match.",
+      "question": "Serum angiotensin-converting enzyme and frequency of severe hypoglycaemia in Type 1 diabetes: does a",
+      "risk_score": 0.210843
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 100% terms as missing. Too aggressive.",
+      "question": "Reporting and interpreting red blood cell morphology: is there discordance between clinical patholog",
+      "risk_score": 0.41661000000000004
+    },
+    {
+      "error_type": "FN",
+      "category": "FN-Ret",
+      "domain": "Pharmacology",
+      "reason": "High retrieval score (0.95) for hallucinated answer. Superficial match.",
+      "question": "Does partial expander deflation exacerbate the adverse effects of radiotherapy in two-stage breast r",
+      "risk_score": 0.304516
+    },
+    {
+      "error_type": "FN",
+      "category": "FN-Ret",
+      "domain": "Other",
+      "reason": "High retrieval score (0.98) for hallucinated answer. Superficial match.",
+      "question": "Has the use of complementary and alternative medicine therapies by U.S. adults with chronic disease-",
+      "risk_score": 0.12434700000000004
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 100% terms as missing. Too aggressive.",
+      "question": "Do overweight children necessarily make overweight adults?",
+      "risk_score": 0.429227
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 70% terms as missing. Too aggressive.",
+      "question": "Biliary atresia: should all patients undergo a portoenterostomy?",
+      "risk_score": 0.4805960000000001
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Endocrinology",
+      "reason": "Entity check flagged 80% terms as missing. Too aggressive.",
+      "question": "Does early discharge with nurse home visits affect adequacy of newborn metabolic screening?",
+      "risk_score": 0.436877
+    },
+    {
+      "error_type": "FN",
+      "category": "FN-Ret",
+      "domain": "Other",
+      "reason": "High retrieval score (0.98) for hallucinated answer. Superficial match.",
+      "question": "Thoracic and thoracoabdominal aneurysm repair: is reimplantation of spinal cord arteries a waste of ",
+      "risk_score": 0.27867
+    },
+    {
+      "error_type": "FP",
+      "category": "FP-Entity",
+      "domain": "Other",
+      "reason": "Entity check flagged 100% terms as missing. Too aggressive.",
+      "question": "Does health information exchange reduce redundant imaging?",
+      "risk_score": 0.3266610000000001
+    }
+  ]
+}

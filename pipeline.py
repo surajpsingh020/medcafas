@@ -88,7 +88,7 @@ _nli_model: Optional[CrossEncoder]       = None
 _faiss_index: Optional[faiss.Index]      = None
 _kb_meta: Optional[List[Dict]]           = None
 _bm25_data:   Optional[Dict]             = None
-
+_claim_cache: Dict[Tuple[str, str], str] = {}
 
 def _get_embedder() -> SentenceTransformer:
     global _embedder
@@ -1061,18 +1061,18 @@ def layer3_critic(
     if not claims:
         return 0.5, []
 
+    global _claim_cache
     claim_results: List[ClaimResult] = []
     all_scores:    List[float]       = []
-    contextual_cache: Dict[Tuple[str, str], str] = {}
 
     for claim in claims:
         # ── 1. Contextualize the claim using Llama 3.1 ──
         retrieval_claim = claim
         if question.strip():
             cache_key = (question, claim)
-            if cache_key not in contextual_cache:
-                contextual_cache[cache_key] = contextualize_claim(question, claim)
-            retrieval_claim = contextual_cache[cache_key]
+            if cache_key not in _claim_cache:
+                _claim_cache[cache_key] = contextualize_claim(question, claim)
+            retrieval_claim = _claim_cache[cache_key]
 
         # ── 2. The Amnesia Fix: Give the rewritten claim to DeBERTa ──
         nli_claim = retrieval_claim

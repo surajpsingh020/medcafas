@@ -13,8 +13,7 @@ export default function Sidebar() {
             Layer 1 — Self-Consistency
           </p>
           <p className="mt-1 text-xs text-gray-500">
-            Asks the LLM the same question 3× at different temperatures and measures
-            semantic drift. High drift = model unsure.
+            Evaluates internal model confidence via multi-sample generation. High semantic drift across answers indicates uncertainty and hallucination risk.
           </p>
         </div>
 
@@ -24,8 +23,7 @@ export default function Sidebar() {
             Layer 2 — Retrieval
           </p>
           <p className="mt-1 text-xs text-gray-500">
-            Embeds the answer and searches a medical knowledge base (MedMCQA).
-            Low similarity = unsupported claim.
+            Hybrid search (FAISS + BM25) retrieves the most relevant medical evidence. Low similarity = unsupported claim.
           </p>
         </div>
 
@@ -35,16 +33,14 @@ export default function Sidebar() {
             Layer 3 — NLI Critic
           </p>
           <p className="mt-1 text-xs text-gray-500">
-            A cross-encoder model checks if the answer is{' '}
-            <em>entailed</em> by the retrieved evidence. Low entailment =
-            hallucination risk.
+            A DeBERTa-v3 cross-encoder checks if each generated claim is logically entailed by the retrieved evidence.
           </p>
         </div>
       </div>
 
       <div className="mt-6 border-t border-gray-100 pt-5 space-y-2 text-xs text-gray-400">
-        <p>⚡ CPU-only · No GPU required</p>
-        <p>🏥 Built on MedMCQA KB · 50,000 docs</p>
+        <p>⚡ GPU Accelerated · CUDA-optimized for local RTX inference</p>
+        <p>🏥 MedMCQA + NIH KB · 65,000 docs</p>
         <p>🔒 Fully local · No data leaves your machine</p>
       </div>
     </aside>
