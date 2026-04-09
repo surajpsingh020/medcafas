@@ -47,6 +47,7 @@ source venv/bin/activate
 
 # 3. Install the required AI libraries
 pip install -r requirements.txt
+
 📚 Step 3: Build the Medical Library (⚠️ Do not skip!)
 If you try to run the app right now, it will crash because the AI has no medical books to read! We need to compress 65,000 real medical documents into a lightning-fast vector database.
 

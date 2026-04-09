@@ -100,7 +100,7 @@ def main():
         label = f"{val:.1%}" if mkey != "ece" else f"{val:.3f}"
         ax.annotate(label, (sample_sizes[-1], val), textcoords="offset points", xytext=(8, 8), fontsize=10, fontweight="bold", color="#111827")
 
-    fig.suptitle("MedCAFAS Evaluation Metric Stability\nLlama 3.1 | deberta-v3-base NLI | 50k-doc KB", fontsize=14, fontweight="bold", y=1.02)
+    fig.suptitle("MedCAFAS Evaluation Metric Stability\nLlama 3.1 | deberta-v3-base NLI | 65k-doc KB", fontsize=14, fontweight="bold", y=1.02)
     plt.tight_layout()
     out_path = "accuracy_curve.png"
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
