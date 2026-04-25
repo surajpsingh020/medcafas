@@ -12,8 +12,7 @@
 
 ## 🚀 The Problem & Solution
 
-Large language models (LLMs) deployed in medical question-answering systems routinely produce confident but factually incorrect answers — a phenomenon known as **hallucination**. In clinical settings, a single fabricated drug dosage or invented contraindication can directly harm patients. Furthermore, standard Retrieval-Augmented Generation (RAG) often falls into "lexical traps," falsely validating hallucinations simply because they share medical keywords with retrieved documents.
-
+Large language models (LLMs) deployed in medical question-answering systems often produce confident but factually incorrect answers — a phenomenon known as hallucination. In clinical settings, a single fabricated drug dosage or invented contraindication can directly harm patients. Furthermore, standard Retrieval-Augmented Generation (RAG) often falls into "lexical traps," incorrectly validating hallucinations simply because they share medical keywords with retrieved documents.
 MedCAFAS addresses this critical safety gap through a **three-layer detection pipeline** that requires no fine-tuning and no proprietary APIs. It acts as an automated, strict fact-checker — breaking down LLM responses into individual clinical claims and mathematically scores each one against a verified database of **65,000 medical documents** before showing them to a user.
 
 Operating entirely locally (HIPAA-compliant by design) with CUDA optimization, MedCAFAS provides:
